@@ -1,0 +1,604 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="${ROOT_DIR}/install.sh"
+
+bash -n "$SCRIPT"
+bash -n "${ROOT_DIR}/tests/integration.sh"
+[[ ! -f "${ROOT_DIR}/tests/preflight.sh" ]] || bash -n "${ROOT_DIR}/tests/preflight.sh"
+
+bash -c '
+  set -Eeuo pipefail
+  source "$1"
+
+  valid_ipv4_or_domain "203.0.113.10"
+  valid_ipv4_or_domain "proxy.example.com"
+  ! valid_ipv4_or_domain "999.0.0.1"
+  ! valid_ipv4_or_domain "203.0.113.10:1080"
+  ! valid_ipv4_or_domain "-proxy.example.com"
+  valid_domain_name "www.bing.com"
+  ! valid_domain_name "bad..example.com"
+  valid_port "443"
+  ! valid_port "70000"
+
+  parse_socks5_entry "203.0.113.10:1080:test-user:test-password"
+  [[ "$SOCKS_HOST" == "203.0.113.10" ]]
+  [[ "$SOCKS_PORT" == "1080" ]]
+  [[ "$SOCKS_USER" == "test-user" ]]
+  [[ "$SOCKS_PASS" == "test-password" ]]
+  parse_socks5_entry "proxy.example.com:1080:test-user:part1:part2"
+  [[ "$SOCKS_PASS" == "part1:part2" ]]
+  parse_socks5_entry "203.0.113.10:1080"
+  [[ -z "$SOCKS_USER" && -z "$SOCKS_PASS" ]]
+  ! parse_socks5_entry "203.0.113.10:1080:user-only"
+  ! parse_socks5_entry "203.0.113.10:70000:user:password"
+
+  printf -v batch_input "%s\n%s" \
+    "203.0.113.10:1080:user1:password1 198.51.100.20:2080:user2:part1:part2" \
+    "proxy.example.com:3080"
+  parse_socks5_batch_input "$batch_input"
+  [[ "${#SOCKS_BATCH_ENTRIES[@]}" == "3" ]]
+  [[ "${SOCKS_BATCH_ENTRIES[1]}" == "198.51.100.20:2080:user2:part1:part2" ]]
+  printf -v batch_input "%s\n%s" \
+    "203.0.113.10:1080:user1:password1" "invalid-entry"
+  ! parse_socks5_batch_input "$batch_input"
+  [[ "$SOCKS_BATCH_ERROR_INDEX" == "2" ]]
+
+  new_temp_dir
+  panel_fixture_dir="$LAST_TEMP_DIR"
+  platform_fixture="$panel_fixture_dir/os-release"
+  system_advice_output="$(show_supported_system_advice 2>&1)"
+  [[ "$system_advice_output" == *"推荐：Ubuntu 24.04 LTS（64 位，兼容性更成熟）。"* ]]
+  [[ "$system_advice_output" == *"Ubuntu 22.04 LTS、Ubuntu 26.04 LTS、Debian 12、Debian 13"* ]]
+  [[ "$system_advice_output" == *"重装系统前请先备份数据"* ]]
+  apt-get() { :; }
+  OS_RELEASE_FILE="$platform_fixture"
+  printf "%s\n" \
+    "ID=ubuntu" \
+    "VERSION_ID=\"24.04\"" \
+    "PRETTY_NAME=\"Ubuntu 24.04 LTS\"" >"$platform_fixture"
+  check_platform
+  printf "%s\n" \
+    "ID=rocky" \
+    "VERSION_ID=\"9.6\"" \
+    "PRETTY_NAME=\"Rocky Linux 9.6\"" >"$platform_fixture"
+  set +e
+  unsupported_system_output="$(check_platform 2>&1)"
+  unsupported_system_status=$?
+  set -e
+  [[ "$unsupported_system_status" -ne 0 ]]
+  [[ "$unsupported_system_output" == *"当前系统 Rocky Linux 9.6 不受支持"* ]]
+  [[ "$unsupported_system_output" == *"请在 VPS 服务商控制台更换或重装"* ]]
+  [[ "$unsupported_system_output" == *"Ubuntu 24.04 LTS"* ]]
+  printf "%s\n" \
+    "ID=ubuntu" \
+    "VERSION_ID=\"20.04\"" \
+    "PRETTY_NAME=\"Ubuntu 20.04 LTS\"" >"$platform_fixture"
+  set +e
+  unsupported_version_output="$(check_platform 2>&1)"
+  unsupported_version_status=$?
+  set -e
+  [[ "$unsupported_version_status" -ne 0 ]]
+  [[ "$unsupported_version_output" == *"Ubuntu 20.04 LTS 不在支持范围内"* ]]
+  OS_RELEASE_FILE="/etc/os-release"
+  unset -f apt-get
+  xui_fixture_db="$panel_fixture_dir/x-ui.db"
+  sui_fixture_db="$panel_fixture_dir/s-ui.db"
+  : >"$xui_fixture_db"
+  : >"$sui_fixture_db"
+  sqlite3() {
+    local database="" argument query
+    query="${!#}"
+    for argument in "$@"; do
+      [[ "$argument" == "$xui_fixture_db" || "$argument" == "$sui_fixture_db" ]] \
+        && database="$argument"
+    done
+    case "$query" in
+      *"sqlite_master"*"settings"*|*"sqlite_master"*"inbounds"*) printf "1\n" ;;
+      *"SELECT value FROM settings"*)
+        if [[ "$database" == "$xui_fixture_db" ]]; then
+          printf "2053\n2096\n"
+        else
+          printf "2095\n2096\n"
+        fi
+        ;;
+      *"SELECT port FROM inbounds"*) printf "443\n62010\n0\n70000\n" ;;
+      *"json_extract(options"*) printf "8443\n62011\n" ;;
+    esac
+  }
+  PANEL_RESERVED_PORTS=()
+  collect_xui_database_ports "$xui_fixture_db"
+  collect_sui_database_ports "$sui_fixture_db"
+  [[ "${#PANEL_RESERVED_PORTS[@]}" == "7" ]]
+  panel_port_is_reserved "2053"
+  panel_port_is_reserved "2095"
+  panel_port_is_reserved "62010"
+  panel_port_is_reserved "62011"
+  ! panel_port_is_reserved "63000"
+  unset -f sqlite3
+
+  port_is_common_or_panel_port "80"
+  port_is_common_or_panel_port "443"
+  port_is_common_or_panel_port "2095"
+  port_is_common_or_panel_port "2096"
+  port_is_common_or_panel_port "54321"
+  ! port_is_common_or_panel_port "62001"
+
+  unset XRAY_CHAIN_PORT
+  collect_panel_reserved_ports() { PANEL_RESERVED_PORTS=("62010"); }
+  AUTO_TEST_CALLS=0
+  generate_auto_port_candidate() {
+    ((AUTO_TEST_CALLS += 1))
+    if [[ "$AUTO_TEST_CALLS" == "1" ]]; then
+      AUTO_PORT_CANDIDATE="62010"
+    else
+      AUTO_PORT_CANDIDATE="62011"
+    fi
+  }
+  port_is_listening() { return 1; }
+  warn() { :; }
+  info() { :; }
+
+  prompt_yes_no prompt_result "fixture" no <<<"y"
+  [[ "$prompt_result" == "yes" ]]
+  prompt_yes_no prompt_result "fixture" no <<<"n"
+  [[ "$prompt_result" == "no" ]]
+  prompt_yes_no prompt_result "fixture" no <<<""
+  [[ "$prompt_result" == "no" ]]
+  prompt_yes_no prompt_result "fixture" yes <<<""
+  [[ "$prompt_result" == "yes" ]]
+  printf -v prompt_input "invalid\nn"
+  prompt_yes_no prompt_result "fixture" no <<<"$prompt_input"
+  [[ "$prompt_result" == "no" ]]
+  confirm_destructive_action "fixture" <<<"y"
+  ! confirm_destructive_action "fixture" <<<"n"
+  set +e
+  prompt_eof_output="$( (prompt_default prompt_result "测试输入" "默认值" </dev/null) 2>&1 )"
+  prompt_eof_status=$?
+  set -e
+  [[ "$prompt_eof_status" -ne 0 ]]
+  [[ "$prompt_eof_output" == *"未读取到输入：测试输入。"* ]]
+
+  (
+    show_socks_promo() { :; }
+    read_hidden_socks_batch_input() { SOCKS_BATCH_RAW=""; }
+    ADD_DIRECT_NODE="no"
+    collect_socks_batch_settings
+    [[ "$ADD_DIRECT_NODE" == "yes" ]]
+    [[ "${#SOCKS_BATCH_ENTRIES[@]}" == "0" ]]
+  )
+  (
+    detect_public_ipv4() { printf "198.51.100.88"; }
+    SOCKS_EXIT_IP=""
+    verify_direct_outbound
+    [[ "$SOCKS_EXIT_IP" == "198.51.100.88" ]]
+  )
+  set +e
+  (
+    detect_public_ipv4() { :; }
+    verify_direct_outbound
+  ) >/dev/null 2>&1
+  direct_detection_status=$?
+  set -e
+  [[ "$direct_detection_status" -ne 0 ]]
+
+  select_inbound_port
+  [[ "$INBOUND_PORT" == "62011" ]]
+
+  set +e
+  (
+    XRAY_CHAIN_PORT="62010"
+    select_inbound_port
+  ) >/dev/null 2>&1
+  saved_panel_conflict_status=$?
+  set -e
+  [[ "$saved_panel_conflict_status" -ne 0 ]]
+
+  XRAY_CHAIN_PORT="443"
+  port_is_listening() { return 1; }
+  select_inbound_port
+  [[ "$INBOUND_PORT" == "443" ]]
+  unset XRAY_CHAIN_PORT
+
+  set +e
+  (
+    XRAY_CHAIN_PORT="443"
+    port_is_listening() { return 0; }
+    select_inbound_port
+  ) >/dev/null 2>&1
+  explicit_conflict_status=$?
+  set -e
+  [[ "$explicit_conflict_status" -ne 0 ]]
+
+  set +e
+  (
+    unset XRAY_CHAIN_PORT
+    collect_panel_reserved_ports() { PANEL_RESERVED_PORTS=(); }
+    generate_auto_port_candidate() { AUTO_PORT_CANDIDATE="63000"; }
+    port_is_listening() { return 0; }
+    select_inbound_port
+  ) >/dev/null 2>&1
+  all_ports_status=$?
+  set -e
+  [[ "$all_ports_status" -ne 0 ]]
+
+  C_PAW_FILL="<white>"
+  C_RESET="</>"
+  C_BOLD="<bold>"
+  C_GREEN="<green>"
+  banner_output="$(show_brand_banner)"
+  [[ "$banner_output" == *"<white>██</>"* ]]
+  [[ "$banner_output" == *"PuppyIP.com"* ]]
+  BRAND_BANNER_SHOWN="no"
+  refresh_brand_banner >"$panel_fixture_dir/banner-first"
+  refresh_brand_banner >"$panel_fixture_dir/banner-second"
+  grep -Fq "PuppyIP.com" "$panel_fixture_dir/banner-first"
+  [[ ! -s "$panel_fixture_dir/banner-second" ]]
+  promo_output="$(show_socks_promo)"
+  [[ "$promo_output" == *"直接回车：使用 VPS 本机公网 IP；不会经过 SOCKS5"* ]]
+  [[ "$promo_output" == *"支持空格或换行批量输入，最多 50 条"* ]]
+  [[ "$promo_output" == *"IP:端口:用户名:密码"* ]]
+  [[ "$promo_output" == *"请仅用于当地法律与服务条款允许的合规业务"* ]]
+  menu_output="$(show_menu)"
+  [[ "$menu_output" == *"1) 新增本机直连或批量 SOCKS5 出口"* ]]
+  [[ "$menu_output" == *"2) 查看线路、链接和二维码"* ]]
+  [[ "$menu_output" == *"5) 重新生成线路链接（旧链接会失效）"* ]]
+  [[ "$menu_output" == *"6) 检查是否正常运行"* ]]
+  original_script_source="$SCRIPT_SOURCE"
+  SCRIPT_SOURCE="$MANAGER_BIN"
+  running_as_installed_manager
+  SCRIPT_SOURCE="$LEGACY_MANAGER_BIN"
+  running_as_installed_manager
+  SCRIPT_SOURCE="/dev/fd/999999"
+  ! running_as_installed_manager
+  SCRIPT_SOURCE="$original_script_source"
+
+  new_temp_dir
+  fixture_dir="$LAST_TEMP_DIR"
+  STATE_FILE="$fixture_dir/state.json"
+  cat >"$STATE_FILE" <<JSON
+{
+  "schema": 2,
+  "serverAddress": "198.51.100.20",
+  "inboundPort": 443,
+  "serverName": "www.bing.com",
+  "realityPublicKey": "fixture-public-key",
+  "nodes": [
+    {
+      "id": "node-1",
+      "number": 1,
+      "name": "PuppyIP-203.0.113.10",
+      "uuid": "3d107e9d-771a-41a8-88f3-94a9747a8f27",
+      "shortId": "0123456789abcdef",
+      "spiderX": "/0123456789abcdef",
+      "udpMode": "block",
+      "socksHost": "203.0.113.10",
+      "socksPort": 1080,
+      "socksUser": "fixture-user",
+      "exitIp": "203.0.113.10"
+    },
+    {
+      "id": "node-2",
+      "number": 2,
+      "name": "PuppyIP-198.51.100.30",
+      "uuid": "8a235935-76a2-412a-97c6-57f71591aa45",
+      "shortId": "fedcba9876543210",
+      "spiderX": "/fedcba9876543210",
+      "udpMode": "block",
+      "socksHost": "198.51.100.30",
+      "socksPort": 2080,
+      "socksUser": "fixture-user-2",
+      "exitIp": "198.51.100.30"
+    }
+  ]
+}
+JSON
+  share_link="$(build_share_link 1)"
+  [[ "$share_link" == vless://3d107e9d-771a-41a8-88f3-94a9747a8f27@198.51.100.20:443\?* ]]
+  [[ "$share_link" == *"spx=%2F0123456789abcdef"* ]]
+  [[ "$share_link" == *"#PuppyIP-203.0.113.10"* ]]
+  connection_output="$(show_connection 1)"
+  [[ "$connection_output" == *"$share_link"* ]]
+  [[ "$connection_output" == *"PuppyIP.com"* ]]
+  [[ "$connection_output" == *"原生住宅静态 IP · 固定地区 · 长期使用"* ]]
+  multi_connection_output="$(show_connections_by_id node-1 node-2)"
+  [[ "$multi_connection_output" == *"PuppyIP-203.0.113.10"* ]]
+  [[ "$multi_connection_output" == *"PuppyIP-198.51.100.30"* ]]
+  [[ "$(grep -Fc "原生住宅静态 IP · 固定地区 · 长期使用" <<<"$multi_connection_output")" == "1" ]]
+
+  quiet_test_dir="$fixture_dir/quiet"
+  mkdir -p "$quiet_test_dir"
+  dpkg-query() { return 1; }
+  qrencode() { :; }
+  APT_CALLS=0
+  apt-get() {
+    ((APT_CALLS += 1))
+    printf "这段模拟的 apt 输出不应显示在终端：%s\n" "$*"
+  }
+  install_dependencies "$quiet_test_dir" \
+    >"$quiet_test_dir/terminal-stdout" 2>"$quiet_test_dir/terminal-stderr"
+  [[ "$APT_CALLS" == "2" ]]
+  [[ ! -s "$quiet_test_dir/terminal-stdout" ]]
+  [[ ! -s "$quiet_test_dir/terminal-stderr" ]]
+  grep -Fq "这段模拟的 apt 输出不应显示在终端" "$quiet_test_dir/dependencies.log"
+
+  progress_test_dir="$fixture_dir/progress"
+  mkdir -p "$progress_test_dir"
+  original_progress_function="$(declare -f interactive_progress_enabled)"
+  MOCK_PROGRESS_ENABLED="yes"
+  MOCK_CURL_RECORD="$progress_test_dir/curl-arguments"
+  interactive_progress_enabled() { [[ "$MOCK_PROGRESS_ENABLED" == "yes" ]]; }
+  curl() {
+    local -a arguments=("$@")
+    local index destination="" show_mock_progress="no"
+    printf "%s\n" "$@" >"$MOCK_CURL_RECORD"
+    for ((index = 0; index < ${#arguments[@]}; index++)); do
+      if [[ "${arguments[$index]}" == "--output" ]]; then
+        destination="${arguments[$((index + 1))]}"
+      fi
+      [[ "${arguments[$index]}" != "--progress-bar" ]] || show_mock_progress="yes"
+    done
+    [[ -n "$destination" ]]
+    [[ "$show_mock_progress" != "yes" ]] \
+      || printf "\r########################### 37.5%%" >&2
+    sleep 0.25
+    : >"$destination"
+  }
+  download_file "$progress_test_dir/interactive.zip" \
+    "https://example.invalid/interactive.zip" 30 yes "下载测试文件" \
+    >"$progress_test_dir/download-progress" 2>&1
+  grep -Fqx -- "--progress-bar" "$MOCK_CURL_RECORD"
+  ! grep -Fqx -- "--silent" "$MOCK_CURL_RECORD"
+  grep -Fq -- "37%" "$progress_test_dir/download-progress"
+  grep -Fq -- "100%" "$progress_test_dir/download-progress"
+  MOCK_PROGRESS_ENABLED="no"
+  download_file "$progress_test_dir/non-interactive.zip" \
+    "https://example.invalid/non-interactive.zip" 30 yes
+  grep -Fqx -- "--silent" "$MOCK_CURL_RECORD"
+  ! grep -Fqx -- "--progress-bar" "$MOCK_CURL_RECORD"
+  MOCK_PROGRESS_ENABLED="yes"
+  SOCKS_BATCH_RAW=""
+  read_hidden_socks_batch_input "SOCKS5: " <<<"fixture-secret" \
+    >"$progress_test_dir/prompt-output"
+  [[ "$SOCKS_BATCH_RAW" == "fixture-secret" ]]
+  prompt_escape="$(printf "\033")"
+  grep -Fq "${prompt_escape}[3A" "$progress_test_dir/prompt-output"
+  grep -Fq "${prompt_escape}[2K" "$progress_test_dir/prompt-output"
+  grep -Fq "粘贴后按回车（输入内容会隐藏）" "$progress_test_dir/prompt-output"
+  grep -Fq "直接回车 = 使用 VPS 本机 IP" "$progress_test_dir/prompt-output"
+  failing_progress_task() { sleep 0.05; return 7; }
+  set +e
+  run_logged_task "模拟失败任务" "$progress_test_dir/failure.log" \
+    failing_progress_task >"$progress_test_dir/progress-output" 2>&1
+  progress_status=$?
+  set -e
+  [[ "$progress_status" == "7" ]]
+  eval "$original_progress_function"
+  unset -f curl failing_progress_task
+
+  reuse_source="$fixture_dir/reuse-source"
+  reuse_destination="$fixture_dir/reuse-destination"
+  mkdir -p "$reuse_source/assets"
+  XRAY_BIN="$reuse_source/xray"
+  ASSET_DIR="$reuse_source/assets"
+  STATE_FILE="$reuse_source/state.json"
+  printf "fixture-xray" >"$XRAY_BIN"
+  printf "fixture-geoip" >"$ASSET_DIR/geoip.dat"
+  printf "fixture-geosite" >"$ASSET_DIR/geosite.dat"
+  printf "{\"xrayVersion\":\"v26.3.27\"}" >"$STATE_FILE"
+  chmod 0755 "$XRAY_BIN"
+  state_value() {
+    jq -er "$1 // empty" "$STATE_FILE" 2>/dev/null || printf "%s" "${2:-}"
+  }
+  stage_installed_xray "$reuse_destination"
+  cmp -s "$XRAY_BIN" "$reuse_destination/xray/xray"
+  cmp -s "$ASSET_DIR/geoip.dat" "$reuse_destination/xray/geoip.dat"
+  cmp -s "$ASSET_DIR/geosite.dat" "$reuse_destination/xray/geosite.dat"
+  [[ "$(<"$reuse_destination/xray-version")" == "v26.3.27" ]]
+  remote_manager="$fixture_dir/remote-manager"
+  original_script_source="$SCRIPT_SOURCE"
+  fixture_script_path="$1"
+  SCRIPT_SOURCE="/dev/fd/999999"
+  MOCK_MANAGER_URL=""
+  curl() {
+    local destination="" last_argument=""
+    while (( $# > 0 )); do
+      if [[ "$1" == "--output" ]]; then
+        destination="$2"
+        shift 2
+      else
+        last_argument="$1"
+        shift
+      fi
+    done
+    if [[ -n "$destination" ]]; then
+      MOCK_MANAGER_URL="$last_argument"
+      cp -- "$fixture_script_path" "$destination"
+    else
+      printf "%s\n" \
+        "{\"object\":{\"sha\":\"0123456789abcdef0123456789abcdef01234567\"}}"
+    fi
+  }
+  prepare_manager_copy "$remote_manager"
+  grep -Fqx "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$remote_manager"
+  [[ -x "$remote_manager" ]]
+  [[ "$MOCK_MANAGER_URL" == \
+    "https://raw.githubusercontent.com/feng9254/xray-chain-installer/0123456789abcdef0123456789abcdef01234567/install.sh" ]]
+  unset -f curl
+  SCRIPT_SOURCE="$original_script_source"
+  bbr_test_dir="$fixture_dir/bbr"
+  DATA_DIR="$bbr_test_dir/data"
+  BBR_STATE_FILE="$DATA_DIR/bbr-state.json"
+  BBR_SYSCTL_FILE="$bbr_test_dir/sysctl/99-zz-puppyip-bbr.conf"
+  BBR_MODULES_FILE="$bbr_test_dir/modules/puppyip-bbr.conf"
+  mkdir -p "$DATA_DIR"
+  MOCK_CC="cubic"
+  MOCK_QDISC="fq_codel"
+  MOCK_AVAILABLE="reno cubic bbr"
+  MOCK_FAIL_BBR_APPLY="no"
+  sysctl() {
+    if [[ "$1" == "-n" ]]; then
+      case "$2" in
+        net.ipv4.tcp_congestion_control) printf "%s\n" "$MOCK_CC" ;;
+        net.core.default_qdisc) printf "%s\n" "$MOCK_QDISC" ;;
+        net.ipv4.tcp_available_congestion_control) printf "%s\n" "$MOCK_AVAILABLE" ;;
+        *) return 1 ;;
+      esac
+      return 0
+    fi
+    if [[ "$1" == "-q" && "$2" == "-w" ]]; then
+      case "$3" in
+        net.ipv4.tcp_congestion_control=*)
+          [[ "$MOCK_FAIL_BBR_APPLY" != "yes" || "${3#*=}" != "bbr" ]] || return 1
+          MOCK_CC="${3#*=}"
+          ;;
+        net.core.default_qdisc=*) MOCK_QDISC="${3#*=}" ;;
+        *) return 1 ;;
+      esac
+      return 0
+    fi
+    return 1
+  }
+  modprobe() { :; }
+  systemctl() { return 1; }
+  install() {
+    [[ "$1" == "-d" ]] || return 1
+    shift
+    while (( $# > 0 )); do
+      case "$1" in
+        -o|-g|-m) shift 2 ;;
+        *) mkdir -p "$1"; shift ;;
+      esac
+    done
+  }
+  atomic_install() {
+    cp -- "$1" "$2"
+    chmod "$3" "$2"
+  }
+  XRAY_CHAIN_ENABLE_BBR=1
+  configure_bbr
+  [[ "$BBR_CHANGED" == "yes" ]]
+  [[ "$MOCK_CC" == "bbr" && "$MOCK_QDISC" == "fq" ]]
+  grep -Fqx "net.ipv4.tcp_congestion_control = bbr" "$BBR_SYSCTL_FILE"
+  grep -Fqx "tcp_bbr" "$BBR_MODULES_FILE"
+  bbr_state_is_valid
+  restore_bbr_settings
+  [[ "$MOCK_CC" == "cubic" && "$MOCK_QDISC" == "fq_codel" ]]
+  [[ ! -e "$BBR_STATE_FILE" && ! -e "$BBR_SYSCTL_FILE" && ! -e "$BBR_MODULES_FILE" ]]
+
+  MOCK_CC="bbr"
+  MOCK_QDISC="fq_codel"
+  configure_bbr
+  [[ "$BBR_CHANGED" == "no" ]]
+  [[ "$MOCK_CC" == "bbr" && "$MOCK_QDISC" == "fq_codel" ]]
+  [[ ! -e "$BBR_STATE_FILE" && ! -e "$BBR_SYSCTL_FILE" && ! -e "$BBR_MODULES_FILE" ]]
+
+  MOCK_CC="cubic"
+  MOCK_QDISC="fq_codel"
+  MOCK_AVAILABLE="reno cubic"
+  configure_bbr
+  [[ "$BBR_CHANGED" == "no" ]]
+  [[ "$MOCK_CC" == "cubic" && "$MOCK_QDISC" == "fq_codel" ]]
+  [[ ! -e "$BBR_STATE_FILE" && ! -e "$BBR_SYSCTL_FILE" && ! -e "$BBR_MODULES_FILE" ]]
+
+  MOCK_AVAILABLE="reno cubic bbr"
+  printf "%s\n" "# administrator-owned" >"$BBR_SYSCTL_FILE"
+  configure_bbr
+  [[ "$BBR_CHANGED" == "no" ]]
+  [[ "$(<"$BBR_SYSCTL_FILE")" == "# administrator-owned" ]]
+  [[ "$MOCK_CC" == "cubic" && "$MOCK_QDISC" == "fq_codel" ]]
+  rm -f -- "$BBR_SYSCTL_FILE"
+
+  MOCK_FAIL_BBR_APPLY="yes"
+  configure_bbr
+  [[ "$BBR_CHANGED" == "no" ]]
+  [[ "$MOCK_CC" == "cubic" && "$MOCK_QDISC" == "fq_codel" ]]
+  [[ ! -e "$BBR_STATE_FILE" && ! -e "$BBR_SYSCTL_FILE" && ! -e "$BBR_MODULES_FILE" ]]
+  MOCK_FAIL_BBR_APPLY="no"
+
+  XRAY_CHAIN_ENABLE_BBR=0
+  configure_bbr
+  [[ "$MOCK_CC" == "cubic" && "$MOCK_QDISC" == "fq_codel" ]]
+  unset -f sysctl modprobe systemctl install atomic_install
+' _ "$SCRIPT"
+
+if grep -En -- '--no-check-certificate|curl[^\n]*(--insecure|-k)([[:space:]]|$)|github[^\n]*(proxy|mirror)' "$SCRIPT"; then
+  printf '发现不允许的不安全下载选项或第三方 GitHub 代理。\n' >&2
+  exit 1
+fi
+
+for required in \
+  'run -test -c' \
+  'SHA2-256=' \
+  'xtls-rprx-vision' \
+  'security=reality' \
+  'https://PuppyIP.com' \
+  'PuppyIP.com' \
+  '推荐：Ubuntu 24.04 LTS（64 位，兼容性更成熟）。' \
+  'Ubuntu 22.04 LTS、Ubuntu 26.04 LTS、Debian 12、Debian 13' \
+  '请在 VPS 服务商控制台更换或重装为受支持的系统' \
+  '原生住宅静态 IP · 固定地区 · 长期使用' \
+  "C_PAW_FILL=\$'\\033[1;97m'" \
+  '请粘贴 SOCKS5（可批量；直接回车使用本机 IP）' \
+  'append_batch_nodes_to_model' \
+  'direct-out-' \
+  'AUTO_PORT_MIN=62001' \
+  'AUTO_PORT_MAX=65534' \
+  'INSTALLER_RAW_URL="https://raw.githubusercontent.com/feng9254/xray-chain-installer/main/install.sh"' \
+  'INSTALLER_API_URL="https://api.github.com/repos/${INSTALLER_REPOSITORY}"' \
+  '/git/ref/heads/${INSTALLER_BRANCH}' \
+  'source_url="${INSTALLER_RAW_BASE}/${commit}/install.sh"' \
+  'XRAY_CHAIN_ENABLE_BBR=1|0' \
+  'confirm_destructive_action' \
+  'net.ipv4.tcp_congestion_control = bbr' \
+  'restore_bbr_settings' \
+  'XRAY_CHAIN_PORT=62001' \
+  'detect_existing_proxy_stacks' \
+  'ss -H -lntu' \
+  'sqlite3 -readonly' \
+  "json_extract(options, '\$.listen_port')" \
+  'socks-out-' \
+  'user: [.email]' \
+  'inboundTag: ["vless-in"]' \
+  'nextNodeNumber' \
+  'schema: 2' \
+  'LEGACY_MANAGER_BIN="/usr/local/sbin/xray-chain"' \
+  'MANAGER_BIN="/usr/local/sbin/puppyip"' \
+  'XRAY_CHAIN_UDP_MODE:-proxy' \
+  '更换线路的 SOCKS5 或 UDP 设置' \
+  'if ! running_as_installed_manager; then' \
+  'if installation_complete; then pause_menu; else exit 0; fi' \
+  'rollback_backup'; do
+  grep -Fq -- "$required" "$SCRIPT" || {
+    printf '缺少关键实现：%s\n' "$required" >&2
+    exit 1
+  }
+done
+
+if grep -Fq '请输入 UNINSTALL 确认' "$SCRIPT"; then
+  printf '卸载流程不应再要求输入确认单词。\n' >&2
+  exit 1
+fi
+
+if grep -Fq '9) command_uninstall; exit 0 ;;' "$SCRIPT"; then
+  printf '取消卸载后不应直接退出管理菜单。\n' >&2
+  exit 1
+fi
+
+if grep -Fq '\033[2J' "$SCRIPT" || grep -Fq '\033[H' "$SCRIPT"; then
+  printf '交互脚本不应清屏或重置光标；终端历史必须可以回看。\n' >&2
+  exit 1
+fi
+
+if grep -Eq '^[[:space:]]*curl[[:space:]]+--progress-bar' "$SCRIPT"; then
+  printf 'curl 内置进度条不应直接连接到用户终端。\n' >&2
+  exit 1
+fi
+
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck "$SCRIPT" "${ROOT_DIR}/tests/static.sh" \
+    "${ROOT_DIR}/tests/integration.sh" "${ROOT_DIR}/tests/preflight.sh"
+fi
+
+printf '静态检查通过。\n'
