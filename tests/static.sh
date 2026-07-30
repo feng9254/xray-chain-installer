@@ -49,9 +49,8 @@ bash -c '
   panel_fixture_dir="$LAST_TEMP_DIR"
   platform_fixture="$panel_fixture_dir/os-release"
   system_advice_output="$(show_supported_system_advice 2>&1)"
-  [[ "$system_advice_output" == *"推荐：Ubuntu 24.04 LTS（64 位，兼容性更成熟）。"* ]]
-  [[ "$system_advice_output" == *"Ubuntu 22.04 LTS、Ubuntu 26.04 LTS、Debian 12、Debian 13"* ]]
-  [[ "$system_advice_output" == *"重装系统前请先备份数据"* ]]
+  [[ "$system_advice_output" == *"请改用 Ubuntu 24.04 LTS（64 位）后重试"* ]]
+  [[ "$system_advice_output" == *"重装前请备份数据"* ]]
   apt-get() { :; }
   OS_RELEASE_FILE="$platform_fixture"
   printf "%s\n" \
@@ -69,7 +68,7 @@ bash -c '
   set -e
   [[ "$unsupported_system_status" -ne 0 ]]
   [[ "$unsupported_system_output" == *"当前系统 Rocky Linux 9.6 不受支持"* ]]
-  [[ "$unsupported_system_output" == *"请在 VPS 服务商控制台更换或重装"* ]]
+  [[ "$unsupported_system_output" == *"请改用 Ubuntu 24.04 LTS（64 位）后重试"* ]]
   [[ "$unsupported_system_output" == *"Ubuntu 24.04 LTS"* ]]
   printf "%s\n" \
     "ID=ubuntu" \
@@ -236,13 +235,19 @@ bash -c '
   grep -Fq "PuppyIP.com" "$panel_fixture_dir/banner-first"
   [[ ! -s "$panel_fixture_dir/banner-second" ]]
   promo_output="$(show_socks_promo)"
-  [[ "$promo_output" == *"直接回车：使用 VPS 本机公网 IP；不会经过 SOCKS5"* ]]
-  [[ "$promo_output" == *"支持空格或换行批量输入，最多 50 条"* ]]
+  [[ "$promo_output" == *"PuppyIP.com"* ]]
+  [[ "$promo_output" == *"原生住宅静态 IP"* ]]
+  [[ "$promo_output" == *"直接回车 = 使用 VPS 本机 IP"* ]]
+  [[ "$promo_output" == *"支持批量，最多 50 条"* ]]
   [[ "$promo_output" == *"IP:端口:用户名:密码"* ]]
-  [[ "$promo_output" == *"请仅用于当地法律与服务条款允许的合规业务"* ]]
+  [[ "$promo_output" != *"请仅用于当地法律与服务条款允许的合规业务"* ]]
+  edit_promo_output="$(show_socks_promo edit)"
+  [[ "$edit_promo_output" == *"直接回车 = 保留当前出口"* ]]
+  [[ "$edit_promo_output" != *"支持批量"* ]]
   menu_output="$(show_menu)"
   [[ "$menu_output" == *"1) 新增本机直连或批量 SOCKS5 出口"* ]]
   [[ "$menu_output" == *"2) 查看线路、链接和二维码"* ]]
+  [[ "$menu_output" == *"3) 更换线路的出口 IP"* ]]
   [[ "$menu_output" == *"4) 暂停或启用线路"* ]]
   [[ "$menu_output" == *"6) 重新生成线路链接（旧链接会失效）"* ]]
   [[ "$menu_output" == *"7) 检查是否正常运行"* ]]
@@ -256,11 +261,11 @@ bash -c '
   ! running_as_installed_manager
   SCRIPT_SOURCE="$original_script_source"
 
-  semantic_version_is_newer "0.2.14" "0.2.13"
+  semantic_version_is_newer "0.2.15" "0.2.14"
   semantic_version_is_newer "1.0.0" "0.99.99"
-  ! semantic_version_is_newer "0.2.13" "0.2.13"
-  ! semantic_version_is_newer "0.2.12" "0.2.13"
-  ! semantic_version_is_newer "legacy" "0.2.13"
+  ! semantic_version_is_newer "0.2.14" "0.2.14"
+  ! semantic_version_is_newer "0.2.13" "0.2.14"
+  ! semantic_version_is_newer "legacy" "0.2.14"
 
   (
     upgrade_fixture_dir="$panel_fixture_dir/existing-upgrade"
@@ -269,9 +274,9 @@ bash -c '
     MANAGER_BIN="$upgrade_fixture_dir/puppyip"
     LEGACY_MANAGER_BIN="$upgrade_fixture_dir/xray-chain"
     printf "%s\n" \
-      "{\"schema\":1,\"installerVersion\":\"0.2.12\"}" >"$STATE_FILE"
-    printf "%s\n" "SCRIPT_VERSION=\"0.2.12\"" >"$MANAGER_BIN"
-    printf "%s\n" "SCRIPT_VERSION=\"0.2.12\"" >"$LEGACY_MANAGER_BIN"
+      "{\"schema\":1,\"installerVersion\":\"0.2.13\"}" >"$STATE_FILE"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.13\"" >"$MANAGER_BIN"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.13\"" >"$LEGACY_MANAGER_BIN"
     require_root() { :; }
     check_platform() { :; }
     require_systemd() { :; }
@@ -373,7 +378,7 @@ JSON
   multi_connection_output="$(show_connections_by_id node-1 node-2)"
   [[ "$multi_connection_output" == *"PuppyIP-203.0.113.10"* ]]
   [[ "$multi_connection_output" == *"PuppyIP-198.51.100.30"* ]]
-  [[ "$multi_connection_output" == *"状态：已暂停；原链接和二维码已保留"* ]]
+  [[ "$multi_connection_output" == *"状态：已暂停（链接已保留）"* ]]
   [[ "$(grep -Fc "原生住宅静态 IP · 固定地区 · 长期使用" <<<"$multi_connection_output")" == "1" ]]
   node_list_output="$(print_node_list_file "$STATE_FILE")"
   [[ "$node_list_output" == *"状态：已启用"* ]]
@@ -435,10 +440,10 @@ JSON
     >"$progress_test_dir/prompt-output"
   [[ "$SOCKS_BATCH_RAW" == "fixture-secret" ]]
   prompt_escape="$(printf "\033")"
-  grep -Fq "${prompt_escape}[3A" "$progress_test_dir/prompt-output"
+  grep -Fq "${prompt_escape}[2A" "$progress_test_dir/prompt-output"
   grep -Fq "${prompt_escape}[2K" "$progress_test_dir/prompt-output"
-  grep -Fq "粘贴后按回车（输入内容会隐藏）" "$progress_test_dir/prompt-output"
-  grep -Fq "直接回车 = 使用 VPS 本机 IP" "$progress_test_dir/prompt-output"
+  grep -Fq "输入会隐藏，粘贴后按回车" "$progress_test_dir/prompt-output"
+  ! grep -Fq "直接回车 = 使用 VPS 本机 IP" "$progress_test_dir/prompt-output"
   failing_progress_task() { sleep 0.05; return 7; }
   set +e
   run_logged_task "模拟失败任务" "$progress_test_dir/failure.log" \
@@ -607,12 +612,13 @@ for required in \
   'security=reality' \
   'https://PuppyIP.com' \
   'PuppyIP.com' \
-  '推荐：Ubuntu 24.04 LTS（64 位，兼容性更成熟）。' \
-  'Ubuntu 22.04 LTS、Ubuntu 26.04 LTS、Debian 12、Debian 13' \
-  '请在 VPS 服务商控制台更换或重装为受支持的系统' \
+  '请改用 Ubuntu 24.04 LTS（64 位）后重试' \
   '原生住宅静态 IP · 固定地区 · 长期使用' \
   "C_PAW_FILL=\$'\\033[1;97m'" \
-  '请粘贴 SOCKS5（可批量；直接回车使用本机 IP）' \
+  'SOCKS5（支持批量，最多' \
+  '直接回车 = 使用 VPS 本机 IP' \
+  'y=同意 / n=不同意 / 回车=同意' \
+  'y=同意 / n=不同意 / 回车=不同意' \
   'append_batch_nodes_to_model' \
   'direct-out-' \
   'AUTO_PORT_MIN=62001' \
@@ -639,7 +645,7 @@ for required in \
   'LEGACY_MANAGER_BIN="/usr/local/sbin/xray-chain"' \
   'MANAGER_BIN="/usr/local/sbin/puppyip"' \
   'XRAY_CHAIN_UDP_MODE:-proxy' \
-  '更换线路的 SOCKS5 或 UDP 设置' \
+  '更换线路的出口 IP' \
   '暂停或启用线路' \
   'set_node_enabled_in_model' \
   'command_pause' \
@@ -674,6 +680,23 @@ if grep -Fq '检测到已有线路，现在直接添加新线路' "$SCRIPT"; the
   exit 1
 fi
 
+if grep -Fq '允许 UDP 经该 SOCKS5 上游转发吗？' "$SCRIPT"; then
+  printf '普通更换出口流程不应再询问 UDP。\n' >&2
+  exit 1
+fi
+
+for noisy_text in \
+  '适用：v2rayN、Shadowrocket' \
+  'UDP：尝试经 SOCKS5 转发' \
+  'UDP：已在服务端阻断' \
+  'UDP：经 VPS 本机网络直接发送' \
+  '注意：REALITY 不需要传统 TLS 证书'; do
+  if grep -Fq "$noisy_text" "$SCRIPT"; then
+    printf '节点结果仍包含多余解释：%s\n' "$noisy_text" >&2
+    exit 1
+  fi
+done
+
 if grep -Fq '\033[2J' "$SCRIPT" || grep -Fq '\033[H' "$SCRIPT"; then
   printf '交互脚本不应清屏或重置光标；终端历史必须可以回看。\n' >&2
   exit 1
@@ -686,7 +709,8 @@ fi
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$SCRIPT" "${ROOT_DIR}/tests/static.sh" \
-    "${ROOT_DIR}/tests/integration.sh" "${ROOT_DIR}/tests/preflight.sh"
+    "${ROOT_DIR}/tests/integration.sh" "${ROOT_DIR}/tests/preflight.sh" \
+    "${ROOT_DIR}/tests/rollback.sh"
 fi
 
 printf '静态检查通过。\n'

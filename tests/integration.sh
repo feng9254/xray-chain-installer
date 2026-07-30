@@ -293,8 +293,10 @@ LINK_THREE="$(build_share_link 3)"
 NODE_LIST_OUTPUT="$(print_node_list_file "$STATE_FILE")"
 [[ "$NODE_LIST_OUTPUT" == *'出口：VPS 本机直连 · 公网 IPv4：203.0.113.10'* ]]
 DIRECT_CONNECTION_OUTPUT="$(show_connection 3)"
-[[ "$DIRECT_CONNECTION_OUTPUT" == *'不经过 SOCKS5'* ]]
-[[ "$DIRECT_CONNECTION_OUTPUT" == *'UDP：经 VPS 本机网络直接发送'* ]]
+[[ "$DIRECT_CONNECTION_OUTPUT" == *'出口 IP：203.0.113.10（VPS 本机）'* ]]
+[[ "$DIRECT_CONNECTION_OUTPUT" != *'UDP：'* ]]
+[[ "$DIRECT_CONNECTION_OUTPUT" != *'适用：'* ]]
+[[ "$DIRECT_CONNECTION_OUTPUT" != *'REALITY 不需要传统 TLS 证书'* ]]
 
 # Pausing one node keeps its identity, link, and stored outbound credentials,
 # but removes every route to that outbound and sends the user to blocked.
@@ -570,6 +572,8 @@ verify_socks_proxy() {
   case "$SOCKS_HOST" in
     127.0.0.4) SOCKS_EXIT_IP='198.51.100.3' ;;
     127.0.0.5) SOCKS_EXIT_IP='198.51.100.4' ;;
+    127.0.0.8) SOCKS_EXIT_IP='198.51.100.8' ;;
+    127.0.0.9) SOCKS_EXIT_IP='198.51.100.9' ;;
     *) return 1 ;;
   esac
 }
@@ -611,24 +615,30 @@ jq -e '
   and .["node-5"] == "node-four-password"
 ' "$SECRETS_FILE" >/dev/null
 
-# Editing a SOCKS node can change only its UDP policy while preserving the
-# endpoint, verified exit IP, credentials, and remark.
-update_node_socks_in_model node-4 <<< $'\nn' >/dev/null 2>&1
+# Editing a SOCKS node changes its exit without asking about UDP. The client
+# identity remains intact and the node's existing UDP policy is preserved.
+NODE_FOUR_IDENTITY_BEFORE="$(jq -cer '
+  .nodes[] | select(.id == "node-4") | {uuid, shortId, spiderX, email}
+' "$MODEL_FILE")"
+update_node_socks_in_model node-4 \
+  <<< $'127.0.0.8:8080:replacement-user:replacement-password\ny' >/dev/null 2>&1
 [[ "$NODE_SETTINGS_CHANGED" == 'yes' ]]
 jq -e '
   (.nodes[] | select(.id == "node-4")) as $node
-  | $node.udpMode == "block"
-    and $node.socksHost == "127.0.0.4"
-    and $node.socksPort == 4080
-    and $node.exitIp == "198.51.100.3"
-    and $node.name == "PuppyIP-198.51.100.3"
+  | $node.udpMode == "proxy"
+    and $node.socksHost == "127.0.0.8"
+    and $node.socksPort == 8080
+    and $node.socksUser == "replacement-user"
+    and $node.exitIp == "198.51.100.8"
+    and $node.name == "PuppyIP-198.51.100.8"
 ' "$MODEL_FILE" >/dev/null
-jq -e '."node-4" == "node-three-password"' "$SECRETS_FILE" >/dev/null
-update_node_socks_in_model node-4 <<< $'\nn' >/dev/null 2>&1
+jq -e '."node-4" == "replacement-password"' "$SECRETS_FILE" >/dev/null
+NODE_FOUR_IDENTITY_AFTER="$(jq -cer '
+  .nodes[] | select(.id == "node-4") | {uuid, shortId, spiderX, email}
+' "$MODEL_FILE")"
+[[ "$NODE_FOUR_IDENTITY_AFTER" == "$NODE_FOUR_IDENTITY_BEFORE" ]]
+update_node_socks_in_model node-4 <<< '' >/dev/null 2>&1
 [[ "$NODE_SETTINGS_CHANGED" == 'no' ]]
-update_node_socks_in_model node-4 <<< $'\ny' >/dev/null 2>&1
-[[ "$NODE_SETTINGS_CHANGED" == 'yes' ]]
-jq -e '.nodes[] | select(.id == "node-4") | .udpMode == "proxy"' "$MODEL_FILE" >/dev/null
 
 # Empty input creates one verified VPS-direct node instead of a SOCKS node.
 collect_socks_batch_settings() {
@@ -668,6 +678,20 @@ jq -e '
   and .nodes[-1].enabled == true
 ' "$MODEL_FILE" >/dev/null
 jq -e '."node-7" == "node-seven-password"' "$SECRETS_FILE" >/dev/null
+
+# A legacy node that already blocks UDP keeps that behavior while its exit is
+# replaced; the beginner edit flow never changes UDP as a side effect.
+update_node_socks_in_model node-7 \
+  <<< $'127.0.0.9:9080:legacy-replacement:legacy-password\nn' >/dev/null 2>&1
+[[ "$NODE_SETTINGS_CHANGED" == 'yes' ]]
+jq -e '
+  (.nodes[] | select(.id == "node-7")) as $node
+  | $node.udpMode == "block"
+    and $node.socksHost == "127.0.0.9"
+    and $node.socksPort == 9080
+    and $node.exitIp == "198.51.100.9"
+' "$MODEL_FILE" >/dev/null
+jq -e '."node-7" == "legacy-password"' "$SECRETS_FILE" >/dev/null
 
 CRUD_STATE="${TEST_DIR}/crud-state.json"
 CRUD_CONFIG="${TEST_DIR}/crud-config.json"

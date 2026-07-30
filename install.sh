@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="0.2.13"
+SCRIPT_VERSION="0.2.14"
 CURRENT_STATE_SCHEMA=2
 SERVICE_NAME="xray-chain.service"
 RUNTIME_USER="xray-chain"
@@ -224,20 +224,20 @@ run_download_task() {
 
 reserve_prompt_space() {
   if interactive_progress_enabled; then
-    # Keep the interactive prompt and its short guidance visible without
-    # clearing scrollback or leaving unexplained blank terminal rows.
-    printf '\n\n\n\033[3A\r'
-    printf '\033[1B\r\033[2K%s↓ 粘贴后按回车（输入内容会隐藏）%s' "$C_CYAN" "$C_RESET"
-    printf '\033[1B\r\033[2K  直接回车 = 使用 VPS 本机 IP\033[2A\r'
+    # Reserve one row below the hidden input so terminal overlays do not cover
+    # the prompt. Keep scrollback intact and show only one action.
+    printf '\n\n\033[2A\r'
+    printf '\033[1B\r\033[2K%s↓ 输入会隐藏，粘贴后按回车%s\033[1A\r' \
+      "$C_CYAN" "$C_RESET"
     PROMPT_SPACE_ACTIVE='yes'
   fi
 }
 
 release_prompt_space() {
   if [[ "$PROMPT_SPACE_ACTIVE" == 'yes' ]] && interactive_progress_enabled; then
-    # Remove only the temporary prompt card and reuse its first row for the
+    # Remove only the temporary prompt row and reuse its first row for the
     # next status line. This does not clear or reset terminal history.
-    printf '\r\033[2K\033[1B\r\033[2K\033[1B\r\033[2K\033[2A\r'
+    printf '\r\033[2K\033[1B\r\033[2K\033[1A\r'
   else
     printf '\n'
   fi
@@ -245,10 +245,7 @@ release_prompt_space() {
 }
 
 show_supported_system_advice() {
-  warn "请在 VPS 服务商控制台更换或重装为受支持的系统后，再重新运行本脚本。"
-  warn "推荐：Ubuntu 24.04 LTS（64 位，兼容性更成熟）。"
-  warn "其他支持：Ubuntu 22.04 LTS、Ubuntu 26.04 LTS、Debian 12、Debian 13。"
-  warn "推荐使用 amd64/x86_64 或 arm64/aarch64 架构；重装系统前请先备份数据。"
+  warn "请改用 Ubuntu 24.04 LTS（64 位）后重试；重装前请备份数据。"
 }
 
 die_unsupported_system() {
@@ -259,8 +256,7 @@ die_unsupported_system() {
 
 die_unsupported_architecture() {
   printf '%s[x]%s 暂不支持 CPU 架构：%s\n' "$C_RED" "$C_RESET" "$1" >&2
-  warn "请更换为提供 amd64/x86_64 或 arm64/aarch64 的 64 位 VPS。"
-  warn "推荐系统：Ubuntu 24.04 LTS（64 位）。"
+  warn "请改用 Ubuntu 24.04 LTS（amd64 或 arm64）。"
   exit 1
 }
 
@@ -316,11 +312,15 @@ show_error_log() {
 }
 
 show_socks_promo() {
-  printf '\n%s--- 还没有上游 SOCKS5？---%s\n' "$C_CYAN" "$C_RESET"
-  printf 'PuppyIP 提供原生住宅静态 IP：%shttps://PuppyIP.com%s\n' "$C_GREEN" "$C_RESET"
-  printf '%s直接回车：使用 VPS 本机公网 IP；不会经过 SOCKS5。%s\n' "$C_BOLD" "$C_RESET"
-  printf '粘贴 SOCKS5（支持空格或换行批量输入，最多 %s 条）：IP:端口:用户名:密码\n' "$MAX_BATCH_SIZE"
-  printf '请仅用于当地法律与服务条款允许的合规业务。\n\n'
+  local mode="${1:-add}"
+  printf '\n%s%shttps://PuppyIP.com%s · 原生住宅静态 IP\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
+  if [[ "$mode" == 'edit' ]]; then
+    printf 'SOCKS5：IP:端口:用户名:密码\n'
+    printf '直接回车 = 保留当前出口\n'
+  else
+    printf 'SOCKS5（支持批量，最多 %s 条）：IP:端口:用户名:密码\n' "$MAX_BATCH_SIZE"
+    printf '直接回车 = 使用 VPS 本机 IP\n'
+  fi
 }
 
 cleanup() {
@@ -430,12 +430,7 @@ detect_existing_proxy_stacks() {
   fi
 
   (( ${#detected[@]} > 0 )) || return 0
-  warn "检测到现有代理环境：${detected[*]}。"
-  info "PuppyIP 使用独立的 xray-chain.service、运行用户和目录，不会修改这些面板或配置。"
-  if (( ${#PANEL_RESERVED_PORTS[@]} > 0 )); then
-    info "已只读识别 ${#PANEL_RESERVED_PORTS[@]} 个面板保存端口；未读取账号、密码或节点凭据。"
-  fi
-  warn "将避开面板保存端口和当前监听端口；非官方路径或外部数据库仍需人工核对。"
+  info "检测到 ${detected[*]}；已避开其端口，不会修改原配置。"
 }
 
 install_dependencies() {
@@ -462,7 +457,7 @@ install_dependencies() {
 
   if ! command -v qrencode >/dev/null 2>&1; then
     if ! run_logged_task "安装二维码组件" "$log_file" apt-get install -y qrencode; then
-      warn "qrencode 安装失败；不影响节点使用，只是不显示终端二维码。"
+      warn "二维码组件安装失败，将只显示链接。"
     fi
   fi
 }
@@ -515,11 +510,11 @@ restore_bbr_settings() {
   fi
 
   if [[ "$restore_failed" == 'yes' ]]; then
-    warn "未能完整恢复安装前的 TCP 参数；重启后系统其他 sysctl 配置通常会重新接管。"
+    warn "BBR 恢复失败，请重启服务器。"
     return 0
   fi
   rm -f -- "$BBR_STATE_FILE"
-  info "已恢复安装前的 TCP 拥塞控制：${previous_cc} · qdisc ${previous_qdisc}。"
+  info "已恢复原 TCP 设置。"
 }
 
 configure_bbr() {
@@ -530,42 +525,42 @@ configure_bbr() {
   case "${preference,,}" in
     1|true|yes|on|'') ;;
     0|false|no|off)
-      info "已按 XRAY_CHAIN_ENABLE_BBR=0 跳过 BBR 设置。"
+      info "已跳过 BBR。"
       return 0
       ;;
     *)
-      warn "XRAY_CHAIN_ENABLE_BBR 仅支持 1/0、true/false、yes/no；为安全起见未修改系统 TCP 参数。"
+      warn "BBR 设置无效，已跳过。"
       return 0
       ;;
   esac
 
   if ! command -v sysctl >/dev/null 2>&1; then
-    warn "系统缺少 sysctl，无法自动启用 BBR；代理服务不受影响。"
+    warn "无法启用 BBR，已跳过。"
     return 0
   fi
   current_cc="$(read_sysctl_value net.ipv4.tcp_congestion_control)"
   current_qdisc="$(read_sysctl_value net.core.default_qdisc)"
   if ! valid_kernel_setting_token "$current_cc" \
     || ! valid_kernel_setting_token "$current_qdisc"; then
-    warn "无法可靠读取当前 TCP 参数，已跳过 BBR 设置。"
+    warn "无法启用 BBR，已跳过。"
     return 0
   fi
   if [[ "$current_cc" == 'bbr' ]]; then
-    info "BBR 已经启用 · tcp ${current_cc} · qdisc ${current_qdisc}。"
+    info "BBR 已启用。"
     return 0
   fi
 
   if [[ -e "$BBR_SYSCTL_FILE" ]] && ! managed_bbr_file "$BBR_SYSCTL_FILE"; then
-    warn "${BBR_SYSCTL_FILE} 已存在且不属于 PuppyIP，未覆盖其网络设置。"
+    warn "检测到现有网络设置，未修改 BBR。"
     return 0
   fi
   if [[ -e "$BBR_MODULES_FILE" ]] && ! managed_bbr_file "$BBR_MODULES_FILE"; then
-    warn "${BBR_MODULES_FILE} 已存在且不属于 PuppyIP，未覆盖其模块设置。"
+    warn "检测到现有网络设置，未修改 BBR。"
     return 0
   fi
   if [[ -e "$BBR_STATE_FILE" ]]; then
     if ! bbr_state_is_valid; then
-      warn "检测到异常的 BBR 恢复记录，未继续修改系统 TCP 参数。"
+      warn "BBR 状态异常，已跳过。"
       return 0
     fi
     previous_cc="$(jq -er '.previousCongestionControl' "$BBR_STATE_FILE")"
@@ -581,7 +576,7 @@ configure_bbr() {
   fi
   available="$(read_sysctl_value net.ipv4.tcp_available_congestion_control)"
   if [[ " ${available} " != *' bbr '* ]]; then
-    warn "当前内核或宿主机未提供 BBR；已保留原拥塞控制 ${current_cc}。"
+    warn "当前系统不支持 BBR，已跳过。"
     return 0
   fi
 
@@ -600,7 +595,7 @@ configure_bbr() {
         previousDefaultQdisc: $previous_qdisc
       }
     ' >"$state_candidate"; then
-    warn "无法生成 BBR 恢复记录，未修改系统 TCP 参数。"
+    warn "BBR 配置失败，已跳过。"
     return 0
   fi
   printf '%s\nnet.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\n' \
@@ -608,13 +603,13 @@ configure_bbr() {
   printf '%s\ntcp_bbr\nsch_fq\n' "$BBR_MANAGED_HEADER" >"$modules_candidate"
   if ! install -d -o root -g root -m 0755 "$(dirname "$BBR_SYSCTL_FILE")" \
     "$(dirname "$BBR_MODULES_FILE")"; then
-    warn "无法准备 sysctl/modules-load 目录，已跳过 BBR 设置。"
+    warn "BBR 配置失败，已跳过。"
     return 0
   fi
 
   if [[ ! -e "$BBR_STATE_FILE" ]] \
     && ! atomic_install "$state_candidate" "$BBR_STATE_FILE" 0600 root root; then
-    warn "无法保存 BBR 恢复记录，未修改系统 TCP 参数。"
+    warn "BBR 配置失败，已跳过。"
     return 0
   fi
   if ! atomic_install "$sysctl_candidate" "$BBR_SYSCTL_FILE" 0644 root root \
@@ -623,20 +618,20 @@ configure_bbr() {
     || ! sysctl -q -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 \
     || [[ "$(read_sysctl_value net.core.default_qdisc)" != 'fq' ]] \
     || [[ "$(read_sysctl_value net.ipv4.tcp_congestion_control)" != 'bbr' ]]; then
-    warn "BBR 应用或验证失败，正在恢复安装前的 TCP 参数。"
+    warn "BBR 启用失败，正在恢复。"
     restore_bbr_settings
     return 0
   fi
 
   BBR_CHANGED='yes'
-  info "BBR 已启用并持久化 · tcp bbr · qdisc fq。"
+  info "BBR 已启用。"
   if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     if systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 \
       && sleep 1 \
       && systemctl is-active --quiet "$SERVICE_NAME"; then
-      info "Xray 已重启，新建连接将使用 BBR。"
+      :
     else
-      warn "BBR 已启用，但 Xray 自动重启失败；请执行 systemctl restart ${SERVICE_NAME}。"
+      warn "请执行：systemctl restart ${SERVICE_NAME}"
       systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
     fi
   fi
@@ -772,7 +767,11 @@ prompt_default() {
 
 prompt_yes_no() {
   local variable="$1" label="$2" default_value="$3" input_answer suffix
-  if [[ "$default_value" == "yes" ]]; then suffix='[Y/n]'; else suffix='[y/N]'; fi
+  if [[ "$default_value" == "yes" ]]; then
+    suffix='[y=同意 / n=不同意 / 回车=同意]'
+  else
+    suffix='[y=同意 / n=不同意 / 回车=不同意]'
+  fi
   while true; do
     if ! read -r -p "${label} ${suffix}: " input_answer; then input_answer=''; fi
     input_answer="${input_answer:-$default_value}"
@@ -785,7 +784,7 @@ prompt_yes_no() {
         printf -v "$variable" 'no'
         return 0
         ;;
-      *) warn "请输入 y 或 n。" ;;
+      *) warn "请输入 y（同意）或 n（不同意）。" ;;
     esac
   done
 }
@@ -1131,7 +1130,7 @@ collect_global_settings() {
 collect_socks_settings() {
   local mode="$1" node_id="${2:-}" socks_entry
   SOCKS_INPUT_CHANGED='no'
-  show_socks_promo
+  show_socks_promo "$mode"
 
   if [[ "$mode" == 'edit' ]]; then
     NODE_TYPE="$(jq -er --arg id "$node_id" '.nodes[] | select(.id == $id) | (.type // "socks")' "$MODEL_FILE")"
@@ -1142,11 +1141,11 @@ collect_socks_settings() {
     if [[ "$NODE_TYPE" == 'direct' ]]; then
       printf '当前出口：VPS 本机直连 · %s\n' \
         "$(jq -r --arg id "$node_id" '.nodes[] | select(.id == $id) | .exitIp' "$MODEL_FILE")"
-      IFS= read -r -s -p "输入 SOCKS5 可改为代理出口（直接回车保留本机直连）: " socks_entry \
+      IFS= read -r -s -p "SOCKS5: " socks_entry \
         || die "未读取到节点出口信息。"
     else
       printf '当前 SOCKS5：%s:%s\n' "$SOCKS_HOST" "$SOCKS_PORT"
-      IFS= read -r -s -p "请输入新的 SOCKS5 信息（IP:端口:用户名:密码，直接回车保留当前）: " socks_entry \
+      IFS= read -r -s -p "SOCKS5: " socks_entry \
         || die "未读取到节点出口信息。"
     fi
   else
@@ -1155,7 +1154,7 @@ collect_socks_settings() {
     SOCKS_PORT=''
     SOCKS_USER=''
     SOCKS_PASS=''
-    IFS= read -r -s -p "请输入 SOCKS5 信息（直接回车使用 VPS 本机公网 IP）: " socks_entry \
+    IFS= read -r -s -p "SOCKS5: " socks_entry \
       || die "未读取到 SOCKS5 信息。"
   fi
   printf '\n'
@@ -1177,8 +1176,7 @@ collect_socks_batch_settings() {
   local parse_status
   ADD_DIRECT_NODE='no'
   show_socks_promo
-  read_hidden_socks_batch_input \
-    "请粘贴 SOCKS5（可批量；直接回车使用本机 IP）: "
+  read_hidden_socks_batch_input "SOCKS5: "
 
   if [[ "$SOCKS_BATCH_RAW" =~ ^[[:space:]]*$ ]]; then
     ADD_DIRECT_NODE='yes'
@@ -1239,7 +1237,7 @@ verify_socks_proxy() {
     && valid_ipv4 "$exit_ip"; then
     SOCKS_EXIT_IP="$exit_ip"
   else
-    warn "无法通过该 SOCKS5 访问测试站点；可能是凭据、白名单、协议或网络问题。"
+    warn "SOCKS5 验证失败，请检查信息或白名单。"
     confirm_continue "仍要写入配置吗？"
   fi
 }
@@ -1247,7 +1245,7 @@ verify_socks_proxy() {
 verify_reality_target() {
   if ! timeout 15 openssl s_client -connect "$REALITY_TARGET" -servername "$SERVER_NAME" -tls1_3 -brief \
     </dev/null >/dev/null 2>&1; then
-    warn "无法与 ${REALITY_TARGET} 完成 TLS 1.3 握手。目标选错会导致客户端无法连接。"
+    warn "REALITY 目标无法连接：${REALITY_TARGET}"
     confirm_continue "仍要使用这个 REALITY 目标吗？"
   fi
 }
@@ -1594,7 +1592,7 @@ append_batch_nodes_to_model() {
 
 update_node_socks_in_model() {
   local node_id="$1" old_exit old_name old_udp suggested update_name='yes'
-  local udp_answer udp_mode settings_changed='no' model_tmp secrets_tmp
+  local udp_mode settings_changed='no' model_tmp secrets_tmp
   NODE_SETTINGS_CHANGED='no'
   old_exit="$(jq -er --arg id "$node_id" '.nodes[] | select(.id == $id) | .exitIp' "$MODEL_FILE")"
   old_name="$(jq -er --arg id "$node_id" '.nodes[] | select(.id == $id) | .name' "$MODEL_FILE")"
@@ -1610,25 +1608,16 @@ update_node_socks_in_model() {
     fi
   fi
 
-  if [[ "$NODE_TYPE" == 'direct' ]]; then
-    udp_mode='proxy'
-  else
-    if [[ "$old_udp" == 'proxy' ]]; then
-      prompt_yes_no udp_answer "允许 UDP 经该 SOCKS5 上游转发吗？" 'yes'
-    else
-      prompt_yes_no udp_answer "允许 UDP 经该 SOCKS5 上游转发吗？" 'no'
-    fi
-    if [[ "$udp_answer" == 'yes' ]]; then udp_mode='proxy'; else udp_mode='block'; fi
-  fi
-
-  [[ "$udp_mode" == "$old_udp" ]] || settings_changed='yes'
+  # Changing an exit must never silently change an existing node's UDP
+  # behavior. New nodes default to proxy; legacy block values remain intact.
+  udp_mode="$old_udp"
   [[ "$settings_changed" == 'yes' ]] || return 0
 
   NODE_NAME="$old_name"
   if [[ "$SOCKS_INPUT_CHANGED" == 'yes' ]]; then
     suggested="$(make_unique_node_name "$node_id")"
     if [[ "$suggested" != "$old_name" ]]; then
-      prompt_yes_no update_name "是否把节点备注更新为 ${suggested}？" 'yes'
+      prompt_yes_no update_name "线路名称改为 ${suggested}？" 'yes'
       [[ "$update_name" == 'yes' ]] && NODE_NAME="$suggested"
     fi
   fi
@@ -2497,16 +2486,6 @@ select_node_id() {
   [[ -n "$SELECTED_NODE_ID" ]] || die "找不到节点：${selector}"
 }
 
-node_udp_mode() {
-  local node_id="$1" schema
-  schema="$(jq -r '.schema // 1' "$STATE_FILE")"
-  if [[ "$schema" == '2' ]]; then
-    jq -er --arg id "$node_id" '.nodes[] | select(.id == $id) | .udpMode' "$STATE_FILE"
-  else
-    state_value '.udpMode' 'block'
-  fi
-}
-
 node_outbound_type() {
   local node_id="$1" schema
   schema="$(jq -r '.schema // 1' "$STATE_FILE")"
@@ -2530,36 +2509,36 @@ node_enabled() {
 }
 
 show_connection() {
-  local selector="${1:-}" footer="${2:-yes}" link udp_mode node_id outbound_type exit_ip enabled
+  local selector="${1:-}" footer="${2:-yes}" link node_id outbound_type exit_ip enabled schema
   select_node_id "$STATE_FILE" "$selector"
   node_id="$SELECTED_NODE_ID"
   link="$(build_share_link "$node_id")"
-  udp_mode="$(node_udp_mode "$node_id")"
   outbound_type="$(node_outbound_type "$node_id")"
   enabled="$(node_enabled "$node_id")"
+  schema="$(jq -r '.schema // 1' "$STATE_FILE")"
+  if [[ "$schema" == '2' ]]; then
+    exit_ip="$(jq -r --arg id "$node_id" \
+      '.nodes[] | select(.id == $id) | .exitIp' "$STATE_FILE")"
+  else
+    exit_ip=''
+  fi
   printf '\n%s客户端导入链接 · %s%s\n' "$C_BOLD" \
     "$(jq -r --arg id "$node_id" \
       'if (.schema // 1) == 2 then (.nodes[] | select(.id == $id) | .name) else .nodeName end' "$STATE_FILE")" \
     "$C_RESET"
   if [[ "$enabled" == 'false' ]]; then
-    printf '%s状态：已暂停；原链接和二维码已保留，重新启用后无需重新导入。%s\n' \
+    printf '%s状态：已暂停（链接已保留）%s\n' \
       "$C_YELLOW" "$C_RESET"
   fi
   printf '%s\n\n' "$link"
   if command -v qrencode >/dev/null 2>&1 && [[ -t 1 ]]; then
     qrencode -t ANSIUTF8 "$link" || true
   fi
-  printf '\n适用：v2rayN、Shadowrocket（VLESS + REALITY + Vision + TCP）\n'
   if [[ "$outbound_type" == 'direct' ]]; then
-    exit_ip="$(jq -r --arg id "$node_id" '.nodes[] | select(.id == $id) | .exitIp' "$STATE_FILE")"
-    printf '出口：VPS 本机直连 · 公网 IPv4：%s · 不经过 SOCKS5。\n' "$exit_ip"
-    printf 'UDP：经 VPS 本机网络直接发送。\n'
-  elif [[ "$udp_mode" == 'block' ]]; then
-    printf 'UDP：已在服务端阻断；不支持 UDP 的 SOCKS 上游建议保持此设置。\n'
+    printf '\n出口 IP：%s（VPS 本机）\n' "${exit_ip:-未验证}"
   else
-    printf 'UDP：尝试经 SOCKS5 转发，能否使用取决于上游服务。\n'
+    printf '\n出口 IP：%s\n' "${exit_ip:-未验证}"
   fi
-  printf '注意：REALITY 不需要传统 TLS 证书；客户端时间必须准确。\n'
   if [[ "$footer" == 'yes' ]]; then
     show_brand_footer
   fi
@@ -2680,7 +2659,6 @@ command_upgrade() {
   prepare_existing_upgrade_candidate "$work_dir" "$version"
   show_progress_line 3 3 "备份并安全应用当前版本"
   finish_progress_line
-  info "节点身份、端口、REALITY 密钥和 SOCKS5 凭据核对通过。"
   ensure_runtime_layout
   deploy_full "$work_dir" yes
   configure_bbr
@@ -2689,15 +2667,13 @@ command_upgrade() {
 }
 
 handle_existing_remote_run() {
-  local answer state_version manager_version schema
+  local answer state_version
   show_brand_banner
   require_root
   check_platform
   require_systemd
   assert_upgrade_not_downgrade
   state_version="$(installed_state_version)"
-  manager_version="$(installed_manager_version "$MANAGER_BIN")"
-  schema="$(installed_state_schema)"
 
   if ! installation_upgrade_needed; then
     info "当前已是 PuppyIP Chain ${SCRIPT_VERSION}，不会重新安装或新增节点。"
@@ -2706,8 +2682,8 @@ handle_existing_remote_run() {
     return 0
   fi
 
-  warn "检测到现有安装：状态版本 ${state_version} · 管理脚本 ${manager_version} · schema ${schema}。"
-  printf '本次只做原地更新：保留监听端口、全部节点、链接、二维码、REALITY 密钥和 SOCKS5 凭据。\n'
+  info "发现旧版本 ${state_version}，可更新到 ${SCRIPT_VERSION}。"
+  printf '现有节点和链接会保留。\n'
   prompt_yes_no answer "是否更新到 PuppyIP Chain ${SCRIPT_VERSION}？" yes
   if [[ "$answer" != 'yes' ]]; then
     info "已取消更新，现有节点和服务未修改。"
@@ -2773,10 +2749,10 @@ command_install() {
   refresh_brand_banner
   show_progress_line 5 5 "检查并启用 BBR"
   configure_bbr
-  info "PuppyIP Chain 安装完成，服务正在运行。"
+  info "安装完成。"
   print_firewall_hint
   show_connections_by_id "${NEW_NODE_IDS[@]}"
-  info "以后管理节点，只需输入：puppyip"
+  info "以后管理请输入：puppyip"
 }
 
 prepare_existing_operation() {
@@ -2818,12 +2794,12 @@ command_add() {
   info "正在校验并统一应用 ${#NEW_NODE_IDS[@]} 个新节点..."
   deploy_model_change "$work_dir" "$version"
   refresh_brand_banner
-  info "${#NEW_NODE_IDS[@]} 个新出口已添加；所有节点继续共用同一个 VLESS 端口。"
+  info "已添加 ${#NEW_NODE_IDS[@]} 个出口。"
   show_connections_by_id "${NEW_NODE_IDS[@]}"
 }
 
 command_edit() {
-  local selector="${1:-}" work_dir version
+  local selector="${1:-}" work_dir version previous_schema
   refresh_brand_banner
   require_root
   check_platform
@@ -2833,15 +2809,20 @@ command_edit() {
   work_dir="$LAST_TEMP_DIR"
   prepare_existing_operation "$work_dir"
   select_node_id "$MODEL_FILE" "$selector"
+  previous_schema="$(jq -r '.schema // 1' "$STATE_FILE")"
   version="$(jq -er '.xrayVersion' "$MODEL_FILE")"
   update_node_socks_in_model "$SELECTED_NODE_ID"
-  if [[ "$NODE_SETTINGS_CHANGED" == 'yes' || "$(jq -r '.schema' "$STATE_FILE")" != '2' ]]; then
+  if [[ "$NODE_SETTINGS_CHANGED" == 'yes' || "$previous_schema" != '2' ]]; then
     info "正在校验并应用修改..."
     deploy_model_change "$work_dir" "$version"
     refresh_brand_banner
-    info "节点出口或 UDP 策略已更新。"
+    if [[ "$NODE_SETTINGS_CHANGED" == 'yes' ]]; then
+      info "节点出口已更新；客户端原链接无需修改。"
+    else
+      info "旧节点格式已安全迁移，节点出口和客户端链接均未改变。"
+    fi
   else
-    info "未修改节点出口或 UDP 策略。"
+    info "未修改节点出口。"
   fi
   show_connection "$SELECTED_NODE_ID"
 }
@@ -2874,10 +2855,10 @@ command_set_enabled() {
 
   if [[ "$target" == 'false' ]]; then
     action='暂停'
-    prompt="确认暂停 ${node_name}？原链接会保留，暂停期间无法使用。"
+    prompt="暂停 ${node_name}？"
   else
     action='启用'
-    prompt="确认启用 ${node_name}？启用后继续使用原链接。"
+    prompt="启用 ${node_name}？"
   fi
 
   if [[ "$current" == "$target" ]]; then
@@ -2893,14 +2874,14 @@ command_set_enabled() {
 
   version="$(jq -er '.xrayVersion' "$MODEL_FILE")"
   set_node_enabled_in_model "$SELECTED_NODE_ID" "$target"
-  info "正在校验并应用线路状态；其他线路可能短暂重连..."
+  info "正在应用线路状态..."
   deploy_model_change "$work_dir" "$version"
   refresh_brand_banner
   if [[ "$target" == 'false' ]]; then
-    info "已暂停 ${node_name}；原链接、二维码和节点凭据均已保留。"
-    info "需要恢复时执行：puppyip resume ${node_number}"
+    info "已暂停 ${node_name}。"
+    info "恢复命令：puppyip resume ${node_number}"
   else
-    info "已启用 ${node_name}；原链接和二维码无需重新导入。"
+    info "已启用 ${node_name}。"
   fi
   print_node_list_file "$STATE_FILE"
 }
@@ -2937,7 +2918,7 @@ command_remove() {
   version="$(jq -er '.xrayVersion' "$MODEL_FILE")"
   remove_node_from_model "$SELECTED_NODE_ID"
   deploy_model_change "$work_dir" "$version"
-  info "已删除 ${node_name}；其他节点编号不会改变。"
+  info "已删除 ${node_name}。"
   print_node_list_file "$STATE_FILE"
 }
 
@@ -2954,8 +2935,7 @@ command_reset() {
   select_node_id "$MODEL_FILE" "$selector"
   node_name="$(jq -er --arg id "$SELECTED_NODE_ID" '.nodes[] | select(.id == $id) | .name' "$MODEL_FILE")"
   if [[ "$assume_yes" != '--yes' ]]; then
-    warn "重置后，该节点的旧链接会立即失效。"
-    if ! confirm_destructive_action "确认重置 ${node_name} 的 UUID、Short ID 和 SpiderX？"; then
+    if ! confirm_destructive_action "重置 ${node_name}？旧链接会失效。"; then
       info "已取消重置。"
       return 0
     fi
@@ -3028,7 +3008,6 @@ command_update() {
   prepare_existing_upgrade_candidate "$work_dir" "$version"
   show_progress_line 4 4 "备份并安全更新 Xray-core"
   finish_progress_line
-  info "节点身份、端口、REALITY 密钥和 SOCKS5 凭据核对通过。"
   ensure_runtime_layout
   deploy_full "$work_dir" yes
   configure_bbr
@@ -3042,8 +3021,7 @@ command_uninstall() {
   require_systemd
   acquire_lock
   if [[ "${1:-}" != '--yes' ]]; then
-    warn "这会停止服务并删除程序、当前配置及管理命令。"
-    if ! confirm_destructive_action "确认卸载 PuppyIP Chain？"; then
+    if ! confirm_destructive_action "卸载 PuppyIP Chain？将删除程序和当前配置。"; then
       info "已取消卸载。"
       return 0
     fi
@@ -3096,7 +3074,7 @@ show_menu() {
     "$C_BOLD" "$C_RESET" "$node_count" "$enabled_count"
   printf '  1) 新增本机直连或批量 SOCKS5 出口\n'
   printf '  2) 查看线路、链接和二维码\n'
-  printf '  3) 更换线路的 SOCKS5 或 UDP 设置\n'
+  printf '  3) 更换线路的出口 IP\n'
   printf '  4) 暂停或启用线路\n'
   printf '  5) 删除线路\n'
   printf '  6) 重新生成线路链接（旧链接会失效）\n'
@@ -3123,7 +3101,7 @@ usage() {
   sudo puppyip add                     新增一个或批量新增 SOCKS5 出口
   sudo puppyip list                    查看节点摘要
   sudo puppyip show [all|节点编号]     显示链接和二维码
-  sudo puppyip edit [节点编号]         修改 SOCKS5 / UDP 策略
+  sudo puppyip edit [节点编号]         更换节点出口 IP
   sudo puppyip pause [节点编号]        暂停节点并保留原链接
   sudo puppyip resume [节点编号]       启用节点并恢复原链接
   sudo puppyip remove [节点编号]       删除节点

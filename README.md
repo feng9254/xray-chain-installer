@@ -82,7 +82,7 @@ puppyip
 ```text
 1) 新增本机直连或批量 SOCKS5 出口
 2) 查看线路、链接和二维码
-3) 更换线路的 SOCKS5 或 UDP 设置
+3) 更换线路的出口 IP
 4) 暂停或启用线路
 5) 删除线路
 6) 重新生成线路链接（旧链接会失效）
@@ -114,7 +114,7 @@ puppyip uninstall
 
 为兼容旧版，原命令 `xray-chain` 仍可继续使用。
 
-菜单中的暂停/启用、删除节点、重置节点凭据和卸载都使用统一的 `[y/N]` 确认：输入 `y` 执行，输入 `n` 或直接回车取消，不需要输入 `DELETE`、`UNINSTALL` 等确认单词。清除历史备份会单独询问，避免误删可能仍需恢复的数据。直接执行明确的 `puppyip pause <编号>` 或 `puppyip resume <编号>` 时会立即应用，不再重复询问。
+每个确认提示都会直接写明 `y=同意`、`n=不同意` 以及回车采用哪个选择。删除、重置和卸载等操作默认不同意；更新提示默认同意。不需要输入 `DELETE`、`UNINSTALL` 等确认单词。清除历史备份会单独询问。直接执行明确的 `puppyip pause <编号>` 或 `puppyip resume <编号>` 时会立即应用，不再重复询问。
 
 ### 暂停与启用线路
 
@@ -249,7 +249,7 @@ REALITY 不需要在 VPS 上申请或续期传统 TLS 证书。客户端系统�
 
 Shadowrocket 没有公开完整、稳定的 URI 参数规范，因此无法承诺所有历史版本都兼容。遇到导入问题时，请先升级客户端再重新扫码。
 
-## UDP 策略
+## UDP 默认行为
 
 新建 SOCKS5 节点默认允许普通 UDP 经该节点绑定的 SOCKS5 上游转发：
 
@@ -265,7 +265,9 @@ XRAY_CHAIN_UDP_MODE=proxy
 XRAY_CHAIN_UDP_MODE=block puppyip add
 ```
 
-已有 SOCKS5 节点可执行 `puppyip edit <节点编号>`：在 SOCKS5 信息处直接回车保留当前出口，再用 `y` 或 `n` 选择是否允许 UDP。新设置会先生成配置并通过 Xray 校验，成功后再应用。
+普通菜单不会再询问 UDP。执行 `puppyip edit <节点编号>` 只用于更换该线路的 SOCKS5 出口；直接回车保留当前出口。更换后 UUID、端口、REALITY 参数和 Short ID 等连接凭据均保持不变，客户已经导入的原节点仍可使用，无需重新导入，只有实际出口 IP 会改变。如果同时更新节点备注，新显示链接只会改变 `#` 后面的客户端名称，不影响旧链接连接。新设置会先完成 SOCKS5 验证、生成候选配置并通过 Xray 校验，成功后再应用。
+
+为了兼容旧用户，脚本内部仍保留每个节点已有的 UDP 策略。更换出口或升级脚本不会顺带改变旧节点的 UDP 状态；新节点继续默认允许 UDP。
 
 本机直连节点不受 `XRAY_CHAIN_UDP_MODE` 影响，默认允许 UDP 经 VPS 本机网络直接发送。
 
@@ -277,7 +279,7 @@ XRAY_CHAIN_UDP_MODE=block puppyip add
 bash <(curl -fsSL https://raw.githubusercontent.com/feng9254/xray-chain-installer/main/install.sh)
 ```
 
-脚本检测到现有安装后会显示已安装版本与当前版本，并使用 `[Y/n]` 询问是否更新；已经是当前版本时只显示状态，不写入任何文件。更新前会把旧状态迁移为当前 schema，再逐项核对以下不变量：
+脚本检测到现有安装后会显示已安装版本与当前版本，并使用 `[y=同意 / n=不同意 / 回车=同意]` 询问是否更新；已经是当前版本时只显示状态，不写入任何文件。更新前会把旧状态迁移为当前 schema，再逐项核对以下不变量：
 
 - VPS 地址和 VLESS 监听端口
 - 全部节点编号、备注、UUID、Short ID、SpiderX 和暂停状态
