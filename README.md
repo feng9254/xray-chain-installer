@@ -75,7 +75,7 @@ sudo bash /tmp/puppyip-install.sh install
 puppyip
 ```
 
-`puppyip` 始终打开完整管理菜单。已经安装后再次执行本页的一键安装命令，则会跳过菜单并直接进入新增线路的 SOCKS5 输入步骤，方便只需要继续添加 IP 的用户。
+`puppyip` 始终打开完整管理菜单。已经安装后再次执行本页的一键命令，脚本只会检查当前版本：发现旧版时询问是否原地更新，已经是最新版时不做修改。它不会重新安装，也不会自动新增节点；继续添加 IP 请使用 `puppyip add`。
 
 菜单提供：
 
@@ -83,12 +83,13 @@ puppyip
 1) 新增本机直连或批量 SOCKS5 出口
 2) 查看线路、链接和二维码
 3) 更换线路的 SOCKS5 或 UDP 设置
-4) 删除线路
-5) 重新生成线路链接（旧链接会失效）
-6) 检查是否正常运行
-7) 查看运行日志
-8) 更新 Xray 程序
-9) 卸载 PuppyIP Chain
+4) 暂停或启用线路
+5) 删除线路
+6) 重新生成线路链接（旧链接会失效）
+7) 检查是否正常运行
+8) 查看运行日志
+9) 更新 Xray 程序
+10) 卸载 PuppyIP Chain
 0) 退出
 ```
 
@@ -100,8 +101,11 @@ puppyip list
 puppyip show all
 puppyip show 2
 puppyip edit 2
+puppyip pause 2
+puppyip resume 2
 puppyip remove 2
 puppyip reset 2
+puppyip upgrade
 puppyip status
 puppyip logs
 puppyip update
@@ -110,17 +114,30 @@ puppyip uninstall
 
 为兼容旧版，原命令 `xray-chain` 仍可继续使用。
 
-删除节点、重置节点凭据和卸载都使用统一的 `[y/N]` 确认：输入 `y` 执行，输入 `n` 或直接回车取消，不需要输入 `DELETE`、`UNINSTALL` 等确认单词。清除历史备份会单独询问，避免误删可能仍需恢复的数据。
+菜单中的暂停/启用、删除节点、重置节点凭据和卸载都使用统一的 `[y/N]` 确认：输入 `y` 执行，输入 `n` 或直接回车取消，不需要输入 `DELETE`、`UNINSTALL` 等确认单词。清除历史备份会单独询问，避免误删可能仍需恢复的数据。直接执行明确的 `puppyip pause <编号>` 或 `puppyip resume <编号>` 时会立即应用，不再重复询问。
+
+### 暂停与启用线路
+
+选择菜单 `4` 后，脚本会列出线路及当前状态。暂停只会禁用选中的线路，不会删除它的 UUID、Short ID、SpiderX、备注、SOCKS5 设置、链接或二维码；再次启用后，客户端原链接可以继续使用，无需重新扫码。也可以直接执行：
+
+```bash
+puppyip pause 2
+puppyip resume 2
+```
+
+暂停时，该 VLESS 用户的所有流量会被明确路由到拒绝出口，不会使用它原来的本机直连或 SOCKS5 上游。原出站设置和密码仍留在本机受限权限的 Xray 配置中，以便无损恢复；其他线路继续按原出口工作。即使全部线路都暂停，Xray 服务和配置也会保持正常，之后仍可逐条启用。
+
+每次暂停或启用都会先生成候选配置、执行 Xray 校验、备份并安全应用。PuppyIP 自己的 Xray 服务会重启一次，因此其他线路已有连接可能短暂重连；不会停止或修改 x-ui、3x-ui、S-UI 及其服务。
 
 ### VPS 本机直连
 
-首次安装、重复执行一键命令或执行 `puppyip add` 时，在 SOCKS5 输入提示处直接回车，脚本就会创建一条不经过 SOCKS5 的本机直连节点。脚本会先绕过终端代理环境检测 VPS 的实际公网 IPv4；检测失败时停止创建，不会输出未经验证的节点。
+首次安装或执行 `puppyip add` 时，在 SOCKS5 输入提示处直接回车，脚本就会创建一条不经过 SOCKS5 的本机直连节点。脚本会先绕过终端代理环境检测 VPS 的实际公网 IPv4；检测失败时停止创建，不会输出未经验证的节点。
 
 直连节点备注采用 `PuppyIP-<本机公网IPv4>` 的形式，例如 `PuppyIP-203.0.113.10`。它拥有独立 UUID、Short ID、SpiderX 和路由规则，TCP 与 UDP 都通过 VPS 本机网络发送。需要同时添加本机直连和多条 SOCKS5 时，先用一次空输入创建直连节点，再执行 `puppyip add` 批量粘贴 SOCKS5。
 
 ### 批量新增出口
 
-首次安装、重复执行一键命令和 `puppyip add` 使用同一套批量输入方式：多条信息使用空格或换行分隔，每条仍保持完整的 `IP:端口:用户名:密码` 格式。SOCKS5 地址支持 IPv4 或域名，当前不接受 IPv6 字面量；用户名和密码不要包含空格或换行，密码中的冒号可以保留。
+首次安装和 `puppyip add` 使用同一套批量输入方式：多条信息使用空格或换行分隔，每条仍保持完整的 `IP:端口:用户名:密码` 格式。SOCKS5 地址支持 IPv4 或域名，当前不接受 IPv6 字面量；用户名和密码不要包含空格或换行，密码中的冒号可以保留。
 
 脚本会先检查整批格式，再逐条测试实际出口 IP。所有节点准备好后只重载一次 Xray；中途取消或部署失败不会留下只添加了一部分的运行配置。添加成功后，所有新链接和二维码会依次直接显示。
 
@@ -129,6 +146,7 @@ puppyip uninstall
 - 一台 VPS 只运行一个 Xray 进程、一个 VLESS 入站和一个 TCP 端口。
 - 每个本机直连或 SOCKS5 出口对应独立的 UUID、Short ID、SpiderX、用户标识、出站和分享链接。
 - Xray 根据 VLESS 用户标识把流量精确路由到对应的 `freedom` 或 SOCKS5 出站。
+- 暂停线路只改变其启用状态；节点身份与分享链接保持不变，启用后继续使用原链接。
 - 未匹配到任何节点的流量会被阻断，不会回落到 VPS 直连出口。
 - 删除节点不会重新编号。删除内部编号 `2` 后，如果下一个可用编号原本是 `4`，新节点仍使用 `4`，不会复用旧编号。
 
@@ -157,6 +175,7 @@ PuppyIP-198.51.100.23
 | SpiderX | 每个节点独立 | 使用随机 16 位十六进制路径 |
 | 出口类型 | 每个节点固定 | 本机直连使用 `freedom`；代理节点使用对应 SOCKS5 |
 | SOCKS5 凭据 | 每个节点独立 | 由用户输入，修改前保持不变 |
+| 线路状态 | 每个节点独立 | 默认启用；暂停和恢复不会重置链接或出口设置 |
 | 节点编号 | 单调递增 | 删除后不回收，避免旧链接与新节点混淆 |
 
 菜单中的“重置节点凭据”只轮换该节点的 UUID、Short ID 和 SpiderX；不会影响其他节点，也不会重置全局 REALITY 密钥。
@@ -250,6 +269,28 @@ XRAY_CHAIN_UDP_MODE=block puppyip add
 
 本机直连节点不受 `XRAY_CHAIN_UDP_MODE` 影响，默认允许 UDP 经 VPS 本机网络直接发送。
 
+## 旧用户原地更新
+
+旧版用户不需要卸载，也不需要重新搭节点。再次执行同一条一键命令：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/feng9254/xray-chain-installer/main/install.sh)
+```
+
+脚本检测到现有安装后会显示已安装版本与当前版本，并使用 `[Y/n]` 询问是否更新；已经是当前版本时只显示状态，不写入任何文件。更新前会把旧状态迁移为当前 schema，再逐项核对以下不变量：
+
+- VPS 地址和 VLESS 监听端口
+- 全部节点编号、备注、UUID、Short ID、SpiderX 和暂停状态
+- REALITY 目标、SNI、公钥与私钥
+- 本机直连或 SOCKS5 地址、端口、用户名、密码、UDP 策略和已验证出口
+- 原分享链接和二维码所依赖的全部参数
+
+只有候选状态、候选 Xray 配置和原安装完全匹配时才会继续。脚本还会直接比较升级前后 Xray 配置里的入站客户端、监听端口、REALITY 参数、Short ID 以及每个实际出站；如果旧状态文件与正在使用的配置已经不一致，会安全停止并提示检查，不会用状态文件静默覆盖运行配置。随后脚本执行 Xray 配置校验、创建完整备份、原子替换管理文件并检查服务；任一步失败都会恢复更新前文件。升级会重启一次 PuppyIP 自己的 Xray，因此现有连接可能短暂重连，但客户端无需重新导入。
+
+如果当前脚本版本比 VPS 已安装版本更旧，脚本会拒绝降级。如果发现 `state.json` 或 `config.json` 尚在但其他安装组件残缺，脚本也会停止，不会把它当成全新安装覆盖；应先备份 `/etc/xray-chain/` 和 `/var/lib/xray-chain/` 再排查。
+
+`puppyip upgrade` 可用当前已经取得的脚本执行同一套原地迁移。`puppyip update` 用于更新 Xray-core，也会先运行同样的节点、密钥与密码核对，不会只更新核心后留下不兼容的旧状态。
+
 ## BBR TCP 加速
 
 安装时默认自动检测 BBR。内核提供 `bbr` 时，脚本会保存安装前的拥塞控制与 qdisc，启用并持久化：
@@ -261,7 +302,7 @@ net.core.default_qdisc = fq
 
 启用后会重启 PuppyIP 自己的 `xray-chain.service`，让新连接使用 BBR；不会重启或修改 x-ui、3x-ui、S-UI 及它们的服务。执行 `puppyip status` 可以查看当前 TCP 拥塞控制和 qdisc。
 
-已经安装旧版 PuppyIP Chain 的 VPS 不需要卸载。重复执行一键安装命令会直接进入新增线路，并在添加成功时同步新版管理命令。若只想同步管理命令并检查 BBR、不添加线路，可在命令末尾明确加上 `install`：
+明确在命令末尾添加 `install` 也会执行原地版本检查与安全迁移，不会进入新增节点流程：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/feng9254/xray-chain-installer/main/install.sh) install
@@ -303,6 +344,8 @@ XRAY_CHAIN_ENABLE_BBR=0 bash <(curl -fsSL https://raw.githubusercontent.com/feng
 - 下载 Xray 后会核对官方 `.dgst` 中的 SHA-256。
 - 通过远程一键命令安装时，落盘的 `puppyip` 管理脚本会固定到一次解析出的 Git 提交，并校验大小、版本标记和 Bash 语法；无法取得固定提交副本时不部署服务。
 - 新配置必须先通过 `xray run -test`。
+- 旧安装更新前会比较版本并拒绝降级；候选配置必须通过身份、端口、REALITY 私钥和 SOCKS5 密码不变量检查。
+- 检测到旧 `state.json` 或 `config.json` 但安装不完整时会停止，不会自动初始化新节点覆盖旧数据。
 - 所有节点修改都使用并发锁、部署前备份、原子替换、服务健康检查和失败回滚。
 - BBR 只通过 PuppyIP 独立的 sysctl/modules-load 文件启用，不安装第三方内核，也不覆盖同名的非 PuppyIP 文件。
 - 脚本不会替换 apt 软件源、删除其他 JSON 文件或修改现有 x-ui、3x-ui、S-UI。
@@ -315,15 +358,15 @@ XRAY_VERSION=v26.3.27 bash <(curl -fsSL https://raw.githubusercontent.com/feng92
 
 ## 旧版自动迁移
 
-检测到旧版 schema 1 单节点配置后，第一次新增或修改节点时会迁移为 schema 2。迁移会保留：
+检测到旧版 schema 1 单节点配置后，第一次原地更新、新增或修改节点时会迁移为 schema 2。迁移会保留：
 
 - VPS 地址和监听端口
 - 原 UUID 与 Short ID
-- REALITY 密钥
+- REALITY 目标、SNI 和密钥
 - SOCKS5 地址、端口、用户名和密码
 - 原节点备注与 UDP 策略
 
-旧版的 `www.microsoft.com:443` REALITY 默认目标会迁移为 `www.bing.com:443`，避免已知的证书记录长度兼容问题。
+迁移不会擅自更换旧 REALITY 目标或 SNI，因为这会改变原分享链接。新安装仍使用当前默认目标；旧节点如需更换目标，应在明确了解会影响原链接后单独处理。
 
 ## 文件与凭据
 

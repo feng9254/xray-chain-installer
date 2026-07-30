@@ -116,6 +116,7 @@ jq -n \
         shortId: "0123456789abcdef",
         spiderX: "/1111111111111111",
         udpMode: "block",
+        enabled: true,
         socksHost: "127.0.0.1",
         socksPort: 1080,
         socksUser: "fixture-user",
@@ -130,6 +131,7 @@ jq -n \
         shortId: "fedcba9876543210",
         spiderX: "/2222222222222222",
         udpMode: "proxy",
+        enabled: true,
         socksHost: "127.0.0.2",
         socksPort: 2080,
         socksUser: "",
@@ -144,6 +146,7 @@ jq -n \
         shortId: "0011223344556677",
         spiderX: "/5555555555555555",
         udpMode: "proxy",
+        enabled: true,
         type: "direct",
         socksHost: "",
         socksPort: 0,
@@ -209,6 +212,73 @@ jq -e '
   | .inboundTag == ["vless-in"] and .outboundTag == "blocked"
 ' "$GENERATED_CONFIG" >/dev/null
 
+# Preparing an in-place upgrade with the installed core must preserve every
+# identity and secret before deployment. Tampering is rejected pre-deploy.
+UPGRADE_WORK="${TEST_DIR}/upgrade-candidate"
+mkdir -p "${UPGRADE_WORK}/xray"
+cp -- "$TEST_XRAY" "${UPGRADE_WORK}/xray/xray"
+cp -- "${TEST_ASSETS}/geoip.dat" "${UPGRADE_WORK}/xray/geoip.dat"
+cp -- "${TEST_ASSETS}/geosite.dat" "${UPGRADE_WORK}/xray/geosite.dat"
+chmod 0755 "${UPGRADE_WORK}/xray/xray"
+STATE_FILE="$GENERATED_STATE"
+CONFIG_FILE="$GENERATED_CONFIG"
+(
+  assert_model_port_available() { :; }
+  prepare_existing_upgrade_candidate "$UPGRADE_WORK" "$TEST_VERSION"
+)
+assert_upgrade_invariants "$GENERATED_STATE" "$GENERATED_CONFIG" \
+  "${UPGRADE_WORK}/candidate-state.json" "${UPGRADE_WORK}/candidate-config.json"
+jq -e --arg version "$SCRIPT_VERSION" \
+  '.installerVersion == $version and .schema == 2' \
+  "${UPGRADE_WORK}/candidate-state.json" >/dev/null
+jq -e --arg secret 'p:a"ss\word' '
+  [.outbounds[]
+   | select(.tag == "socks-out-node-1" and .settings.pass == $secret)]
+  | length == 1
+' "${UPGRADE_WORK}/candidate-config.json" >/dev/null
+STATE_FILE="$GENERATED_STATE"
+UPGRADE_LINKS_BEFORE="$(for node_number in 1 2 3; do build_share_link "$node_number"; printf '\n'; done)"
+STATE_FILE="${UPGRADE_WORK}/candidate-state.json"
+UPGRADE_LINKS_AFTER="$(for node_number in 1 2 3; do build_share_link "$node_number"; printf '\n'; done)"
+[[ "$UPGRADE_LINKS_AFTER" == "$UPGRADE_LINKS_BEFORE" ]]
+STATE_FILE="$GENERATED_STATE"
+
+TAMPERED_STATE="${TEST_DIR}/tampered-upgrade-state.json"
+jq '(.nodes[] | select(.id == "node-1") | .uuid) = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"' \
+  "${UPGRADE_WORK}/candidate-state.json" >"$TAMPERED_STATE"
+set +e
+(
+  assert_upgrade_invariants "$GENERATED_STATE" "$GENERATED_CONFIG" \
+    "$TAMPERED_STATE" "${UPGRADE_WORK}/candidate-config.json"
+) >/dev/null 2>&1
+TAMPERED_IDENTITY_STATUS=$?
+set -e
+[[ "$TAMPERED_IDENTITY_STATUS" -ne 0 ]]
+
+TAMPERED_CONFIG="${TEST_DIR}/tampered-upgrade-config.json"
+jq '(.outbounds[] | select(.tag == "socks-out-node-1") | .settings.pass) = "changed"' \
+  "${UPGRADE_WORK}/candidate-config.json" >"$TAMPERED_CONFIG"
+set +e
+(
+  assert_upgrade_invariants "$GENERATED_STATE" "$GENERATED_CONFIG" \
+    "${UPGRADE_WORK}/candidate-state.json" "$TAMPERED_CONFIG"
+) >/dev/null 2>&1
+TAMPERED_SECRET_STATUS=$?
+set -e
+[[ "$TAMPERED_SECRET_STATUS" -ne 0 ]]
+
+TAMPERED_RUNTIME_CONFIG="${TEST_DIR}/tampered-upgrade-runtime.json"
+jq '(.outbounds[] | select(.tag == "socks-out-node-1") | .settings.address) = "127.0.0.9"' \
+  "${UPGRADE_WORK}/candidate-config.json" >"$TAMPERED_RUNTIME_CONFIG"
+set +e
+(
+  assert_upgrade_invariants "$GENERATED_STATE" "$GENERATED_CONFIG" \
+    "${UPGRADE_WORK}/candidate-state.json" "$TAMPERED_RUNTIME_CONFIG"
+) >/dev/null 2>&1
+TAMPERED_RUNTIME_STATUS=$?
+set -e
+[[ "$TAMPERED_RUNTIME_STATUS" -ne 0 ]]
+
 STATE_FILE="$GENERATED_STATE"
 LINK_ONE="$(build_share_link 1)"
 LINK_TWO="$(build_share_link 2)"
@@ -226,8 +296,162 @@ DIRECT_CONNECTION_OUTPUT="$(show_connection 3)"
 [[ "$DIRECT_CONNECTION_OUTPUT" == *'不经过 SOCKS5'* ]]
 [[ "$DIRECT_CONNECTION_OUTPUT" == *'UDP：经 VPS 本机网络直接发送'* ]]
 
+# Pausing one node keeps its identity, link, and stored outbound credentials,
+# but removes every route to that outbound and sends the user to blocked.
+# Resuming restores the same link. A configuration with every node paused is
+# valid too.
+BASE_SECRETS_FILE="$SECRETS_FILE"
+PAUSE_MODEL="${TEST_DIR}/pause-model.json"
+PAUSE_SECRETS="${TEST_DIR}/pause-secrets.json"
+cp -- "$GENERATED_STATE" "$PAUSE_MODEL"
+cp -- "$BASE_SECRETS_FILE" "$PAUSE_SECRETS"
+MODEL_FILE="$PAUSE_MODEL"
+SECRETS_FILE="$PAUSE_SECRETS"
+STATE_FILE="$PAUSE_MODEL"
+PAUSE_LINK_BEFORE="$(build_share_link 1)"
+PAUSE_IDENTITY_BEFORE="$(jq -cer '
+  .nodes[] | select(.id == "node-1")
+  | {uuid, shortId, spiderX, name, email, type: (.type // "socks"), socksHost, socksPort, socksUser, exitIp, udpMode}
+' "$MODEL_FILE")"
+set_node_enabled_in_model node-1 false
+STATE_FILE="$MODEL_FILE"
+PAUSE_LINK_DURING="$(build_share_link 1)"
+[[ "$PAUSE_LINK_DURING" == "$PAUSE_LINK_BEFORE" ]]
+PAUSED_STATE="${TEST_DIR}/paused-state.json"
+PAUSED_CONFIG="${TEST_DIR}/paused-config.json"
+render_state "$PAUSED_STATE" "$TEST_VERSION"
+render_config "$PAUSED_CONFIG" "$TEST_DIR" "$PAUSED_STATE" "$SECRETS_FILE"
+XRAY_LOCATION_ASSET="$TEST_ASSETS" "$TEST_XRAY" run -test -c "$PAUSED_CONFIG"
+jq -e '
+  [.outbounds[]
+   | select(.tag == "socks-out-node-1" and .settings.pass == "p:a\"ss\\word")]
+  | length == 1
+' "$PAUSED_CONFIG" >/dev/null
+jq -e '
+  [.routing.rules[]
+   | select(.user == ["node-1@puppyip.local"] and .outboundTag == "blocked" and (has("network") | not))]
+  | length == 1
+' "$PAUSED_CONFIG" >/dev/null
+jq -e '
+  [.routing.rules[]
+   | select(.user == ["node-1@puppyip.local"] and .outboundTag == "socks-out-node-1")]
+  | length == 0
+' "$PAUSED_CONFIG" >/dev/null
+jq -e '
+  [.routing.rules[]
+   | select(.user == ["node-2@puppyip.local"] and .outboundTag == "socks-out-node-2")]
+  | length == 1
+' "$PAUSED_CONFIG" >/dev/null
+jq -e '
+  [.inbounds[0].settings.clients[] | select(.email == "node-1@puppyip.local")]
+  | length == 1
+' "$PAUSED_CONFIG" >/dev/null
+
+# A fresh management command reconstructs SOCKS5 secrets from the installed
+# paused config before resuming, so authenticated upstreams remain recoverable.
+STATE_FILE="$PAUSED_STATE"
+CONFIG_FILE="$PAUSED_CONFIG"
+PAUSED_RELOAD_WORK="${TEST_DIR}/paused-reload"
+mkdir -p "$PAUSED_RELOAD_WORK"
+load_model "$PAUSED_RELOAD_WORK" "$TEST_XRAY"
+jq -e '.nodes[] | select(.id == "node-1") | .enabled == false' "$MODEL_FILE" >/dev/null
+jq -e --arg secret 'p:a"ss\word' '."node-1" == $secret' "$SECRETS_FILE" >/dev/null
+set_node_enabled_in_model node-1 true
+STATE_FILE="$MODEL_FILE"
+PAUSE_LINK_AFTER="$(build_share_link 1)"
+PAUSE_IDENTITY_AFTER="$(jq -cer '
+  .nodes[] | select(.id == "node-1")
+  | {uuid, shortId, spiderX, name, email, type: (.type // "socks"), socksHost, socksPort, socksUser, exitIp, udpMode}
+' "$MODEL_FILE")"
+[[ "$PAUSE_LINK_AFTER" == "$PAUSE_LINK_BEFORE" ]]
+[[ "$PAUSE_IDENTITY_AFTER" == "$PAUSE_IDENTITY_BEFORE" ]]
+RESUMED_STATE="${TEST_DIR}/resumed-state.json"
+RESUMED_CONFIG="${TEST_DIR}/resumed-config.json"
+render_state "$RESUMED_STATE" "$TEST_VERSION"
+render_config "$RESUMED_CONFIG" "$TEST_DIR" "$RESUMED_STATE" "$SECRETS_FILE"
+XRAY_LOCATION_ASSET="$TEST_ASSETS" "$TEST_XRAY" run -test -c "$RESUMED_CONFIG"
+jq -e --arg secret 'p:a"ss\word' '
+  [.outbounds[]
+   | select(.tag == "socks-out-node-1" and .settings.pass == $secret)]
+  | length == 1
+' "$RESUMED_CONFIG" >/dev/null
+
+ALL_PAUSED_MODEL="${TEST_DIR}/all-paused-model.json"
+ALL_PAUSED_CONFIG="${TEST_DIR}/all-paused-config.json"
+jq '.nodes |= map(.enabled = false)' "$GENERATED_STATE" >"$ALL_PAUSED_MODEL"
+MODEL_FILE="$ALL_PAUSED_MODEL"
+validate_model "$MODEL_FILE"
+render_config "$ALL_PAUSED_CONFIG" "$TEST_DIR" "$MODEL_FILE" "$SECRETS_FILE"
+XRAY_LOCATION_ASSET="$TEST_ASSETS" "$TEST_XRAY" run -test -c "$ALL_PAUSED_CONFIG"
+jq -e '
+  ([.outbounds[].tag] | sort) ==
+    (["blocked", "direct-out-node-3", "socks-out-node-1", "socks-out-node-2"] | sort)
+' "$ALL_PAUSED_CONFIG" >/dev/null
+jq -e '
+  [.routing.rules[] | select(.outboundTag == "blocked" and (.user | length == 1) and (has("network") | not))]
+  | length == 3
+' "$ALL_PAUSED_CONFIG" >/dev/null
+jq -e '
+  [.routing.rules[]
+   | select(.outboundTag | startswith("socks-out-") or startswith("direct-out-"))]
+  | length == 0
+' "$ALL_PAUSED_CONFIG" >/dev/null
+
+# The public CLI commands apply immediately without a second confirmation,
+# while the menu toggle asks once and leaves state untouched when cancelled.
+COMMAND_MODEL="${TEST_DIR}/command-model.json"
+COMMAND_SECRETS="${TEST_DIR}/command-secrets.json"
+cp -- "$GENERATED_STATE" "$COMMAND_MODEL"
+cp -- "$BASE_SECRETS_FILE" "$COMMAND_SECRETS"
+(
+  DEPLOY_CALLS=0
+  CONFIRM_CALLS=0
+  refresh_brand_banner() { :; }
+  require_root() { :; }
+  check_platform() { :; }
+  require_systemd() { :; }
+  acquire_lock() { :; }
+  new_temp_dir() {
+    LAST_TEMP_DIR="${TEST_DIR}/command-work"
+    mkdir -p "$LAST_TEMP_DIR"
+  }
+  prepare_existing_operation() {
+    MODEL_FILE="$COMMAND_MODEL"
+    SECRETS_FILE="$COMMAND_SECRETS"
+  }
+  deploy_model_change() { ((DEPLOY_CALLS += 1)); }
+  print_node_list_file() { :; }
+  info() { :; }
+  confirm_destructive_action() {
+    ((CONFIRM_CALLS += 1))
+    return 1
+  }
+
+  main pause 1
+  jq -e '.nodes[] | select(.id == "node-1") | .enabled == false' "$COMMAND_MODEL" >/dev/null
+  [[ "$DEPLOY_CALLS" == '1' && "$CONFIRM_CALLS" == '0' ]]
+  main resume 1
+  jq -e '.nodes[] | select(.id == "node-1") | .enabled == true' "$COMMAND_MODEL" >/dev/null
+  [[ "$DEPLOY_CALLS" == '2' && "$CONFIRM_CALLS" == '0' ]]
+
+  command_toggle_enabled 1
+  jq -e '.nodes[] | select(.id == "node-1") | .enabled == true' "$COMMAND_MODEL" >/dev/null
+  [[ "$DEPLOY_CALLS" == '2' && "$CONFIRM_CALLS" == '1' ]]
+  confirm_destructive_action() {
+    ((CONFIRM_CALLS += 1))
+    return 0
+  }
+  command_toggle_enabled 1
+  jq -e '.nodes[] | select(.id == "node-1") | .enabled == false' "$COMMAND_MODEL" >/dev/null
+  [[ "$DEPLOY_CALLS" == '3' && "$CONFIRM_CALLS" == '2' ]]
+)
+
 # Reloading a mixed direct/SOCKS installation keeps direct nodes passwordless
-# and treats older schema-2 nodes without an explicit type as SOCKS.
+# and treats older schema-2 nodes without explicit type/enabled fields as
+# enabled SOCKS nodes.
+SCHEMA2_OLD_STATE="${TEST_DIR}/schema2-without-enabled.json"
+jq 'del(.nodes[].enabled)' "$GENERATED_STATE" >"$SCHEMA2_OLD_STATE"
+STATE_FILE="$SCHEMA2_OLD_STATE"
 CONFIG_FILE="$GENERATED_CONFIG"
 ROUNDTRIP_WORK="${TEST_DIR}/mixed-roundtrip"
 mkdir -p "$ROUNDTRIP_WORK"
@@ -237,6 +461,7 @@ jq -e '
   and (.nodes[] | select(.id == "node-2") | .type) == "socks"
   and (.nodes[] | select(.id == "node-3") | .type) == "direct"
 ' "$MODEL_FILE" >/dev/null
+jq -e 'all(.nodes[]; .enabled == true)' "$MODEL_FILE" >/dev/null
 jq -e 'has("node-3") | not' "$SECRETS_FILE" >/dev/null
 
 # Legacy schema 1 must migrate without changing the original UUID, short ID,
@@ -270,7 +495,27 @@ jq -n --arg private_key "$PRIVATE_KEY" --arg pass 'legacy-test-password' '
   {
     inbounds: [{
       tag: "vless-in",
-      streamSettings: {realitySettings: {privateKey: $private_key}}
+      listen: "0.0.0.0",
+      port: 8443,
+      protocol: "vless",
+      settings: {
+        clients: [{
+          id: "ed9e310c-e22b-4f22-9baf-6b6405e54255",
+          email: "legacy@puppyip.local",
+          flow: "xtls-rprx-vision"
+        }],
+        decryption: "none"
+      },
+      streamSettings: {
+        network: "raw",
+        security: "reality",
+        realitySettings: {
+          target: "www.microsoft.com:443",
+          serverNames: ["www.microsoft.com"],
+          privateKey: $private_key,
+          shortIds: ["aabbccddeeff0011"]
+        }
+      }
     }],
     outbounds: [{
       tag: "socks-out",
@@ -290,9 +535,11 @@ load_model "$MIGRATION_WORK" "$TEST_XRAY"
 jq -e '
   .schema == 2
   and .inboundPort == 8443
-  and .realityTarget == "www.bing.com:443"
+  and .realityTarget == "www.microsoft.com:443"
+  and .serverName == "www.microsoft.com"
   and .nodes[0].uuid == "ed9e310c-e22b-4f22-9baf-6b6405e54255"
   and .nodes[0].shortId == "aabbccddeeff0011"
+  and .nodes[0].enabled == true
   and .nodes[0].socksHost == "127.0.0.3"
   and .nodes[0].socksPort == 3080
   and .nextNodeNumber == 2
@@ -303,6 +550,7 @@ MIGRATED_STATE="${LEGACY_DIR}/migrated-state.json"
 MIGRATED_CONFIG="${LEGACY_DIR}/migrated-config.json"
 render_state "$MIGRATED_STATE" "$TEST_VERSION"
 render_config "$MIGRATED_CONFIG" "$MIGRATION_WORK" "$MIGRATED_STATE" "$SECRETS_FILE"
+assert_upgrade_invariants "$STATE_FILE" "$CONFIG_FILE" "$MIGRATED_STATE" "$MIGRATED_CONFIG"
 XRAY_LOCATION_ASSET="$TEST_ASSETS" "$TEST_XRAY" run -test -c "$MIGRATED_CONFIG"
 
 # Node numbers are monotonic and one batch can add two independent exits.
@@ -355,6 +603,8 @@ jq -e '
   and .nodes[3].name == "PuppyIP-198.51.100.4"
   and .nodes[2].udpMode == "proxy"
   and .nodes[3].udpMode == "proxy"
+  and .nodes[2].enabled == true
+  and .nodes[3].enabled == true
 ' "$MODEL_FILE" >/dev/null
 jq -e '
   .["node-4"] == "node-three-password"
@@ -396,6 +646,7 @@ jq -e '
   and .nodes[-1].socksHost == ""
   and .nodes[-1].socksPort == 0
   and .nodes[-1].udpMode == "proxy"
+  and .nodes[-1].enabled == true
 ' "$MODEL_FILE" >/dev/null
 jq -e 'has("node-6") | not' "$SECRETS_FILE" >/dev/null
 
@@ -414,6 +665,7 @@ jq -e '
   .nextNodeNumber == 8
   and .nodes[-1].id == "node-7"
   and .nodes[-1].udpMode == "block"
+  and .nodes[-1].enabled == true
 ' "$MODEL_FILE" >/dev/null
 jq -e '."node-7" == "node-seven-password"' "$SECRETS_FILE" >/dev/null
 

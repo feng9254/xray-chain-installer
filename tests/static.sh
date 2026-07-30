@@ -243,8 +243,10 @@ bash -c '
   menu_output="$(show_menu)"
   [[ "$menu_output" == *"1) 新增本机直连或批量 SOCKS5 出口"* ]]
   [[ "$menu_output" == *"2) 查看线路、链接和二维码"* ]]
-  [[ "$menu_output" == *"5) 重新生成线路链接（旧链接会失效）"* ]]
-  [[ "$menu_output" == *"6) 检查是否正常运行"* ]]
+  [[ "$menu_output" == *"4) 暂停或启用线路"* ]]
+  [[ "$menu_output" == *"6) 重新生成线路链接（旧链接会失效）"* ]]
+  [[ "$menu_output" == *"7) 检查是否正常运行"* ]]
+  [[ "$menu_output" == *"10) 卸载 PuppyIP Chain"* ]]
   original_script_source="$SCRIPT_SOURCE"
   SCRIPT_SOURCE="$MANAGER_BIN"
   running_as_installed_manager
@@ -253,6 +255,71 @@ bash -c '
   SCRIPT_SOURCE="/dev/fd/999999"
   ! running_as_installed_manager
   SCRIPT_SOURCE="$original_script_source"
+
+  semantic_version_is_newer "0.2.14" "0.2.13"
+  semantic_version_is_newer "1.0.0" "0.99.99"
+  ! semantic_version_is_newer "0.2.13" "0.2.13"
+  ! semantic_version_is_newer "0.2.12" "0.2.13"
+  ! semantic_version_is_newer "legacy" "0.2.13"
+
+  (
+    upgrade_fixture_dir="$panel_fixture_dir/existing-upgrade"
+    mkdir -p "$upgrade_fixture_dir"
+    STATE_FILE="$upgrade_fixture_dir/state.json"
+    MANAGER_BIN="$upgrade_fixture_dir/puppyip"
+    LEGACY_MANAGER_BIN="$upgrade_fixture_dir/xray-chain"
+    printf "%s\n" \
+      "{\"schema\":1,\"installerVersion\":\"0.2.12\"}" >"$STATE_FILE"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.12\"" >"$MANAGER_BIN"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.12\"" >"$LEGACY_MANAGER_BIN"
+    require_root() { :; }
+    check_platform() { :; }
+    require_systemd() { :; }
+    show_brand_banner() { :; }
+    print_node_list_file() { :; }
+    UPGRADE_CALLED="no"
+    command_upgrade() { UPGRADE_CALLED="yes"; }
+    handle_existing_remote_run <<<"y"
+    [[ "$UPGRADE_CALLED" == "yes" ]]
+
+    jq --arg version "$SCRIPT_VERSION" \
+      ".schema = 2 | .installerVersion = \$version" "$STATE_FILE" >"${STATE_FILE}.new"
+    mv -f -- "${STATE_FILE}.new" "$STATE_FILE"
+    printf "%s\n" "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" >"$MANAGER_BIN"
+    printf "%s\n" "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" >"$LEGACY_MANAGER_BIN"
+    UPGRADE_CALLED="no"
+    handle_existing_remote_run </dev/null
+    [[ "$UPGRADE_CALLED" == "no" ]]
+    ! installation_upgrade_needed
+
+    printf "%s\n" "SCRIPT_VERSION=\"9.0.0\"" >"$MANAGER_BIN"
+    set +e
+    (assert_upgrade_not_downgrade) >/dev/null 2>&1
+    downgrade_status=$?
+    set -e
+    [[ "$downgrade_status" -ne 0 ]]
+  )
+
+  (
+    partial_fixture_dir="$panel_fixture_dir/partial-install"
+    mkdir -p "$partial_fixture_dir"
+    STATE_FILE="$partial_fixture_dir/state.json"
+    CONFIG_FILE="$partial_fixture_dir/config.json"
+    XRAY_BIN="$partial_fixture_dir/xray"
+    SERVICE_FILE="$partial_fixture_dir/xray-chain.service"
+    printf "%s\n" "{\"schema\":2}" >"$STATE_FILE"
+    require_root() { :; }
+    check_platform() { :; }
+    require_systemd() { :; }
+    show_brand_banner() { :; }
+    initialize_model() { : >"$partial_fixture_dir/reinitialized"; }
+    set +e
+    (command_install) >/dev/null 2>&1
+    partial_install_status=$?
+    set -e
+    [[ "$partial_install_status" -ne 0 ]]
+    [[ ! -e "$partial_fixture_dir/reinitialized" ]]
+  )
 
   new_temp_dir
   fixture_dir="$LAST_TEMP_DIR"
@@ -286,6 +353,7 @@ bash -c '
       "shortId": "fedcba9876543210",
       "spiderX": "/fedcba9876543210",
       "udpMode": "block",
+      "enabled": false,
       "socksHost": "198.51.100.30",
       "socksPort": 2080,
       "socksUser": "fixture-user-2",
@@ -305,7 +373,11 @@ JSON
   multi_connection_output="$(show_connections_by_id node-1 node-2)"
   [[ "$multi_connection_output" == *"PuppyIP-203.0.113.10"* ]]
   [[ "$multi_connection_output" == *"PuppyIP-198.51.100.30"* ]]
+  [[ "$multi_connection_output" == *"状态：已暂停；原链接和二维码已保留"* ]]
   [[ "$(grep -Fc "原生住宅静态 IP · 固定地区 · 长期使用" <<<"$multi_connection_output")" == "1" ]]
+  node_list_output="$(print_node_list_file "$STATE_FILE")"
+  [[ "$node_list_output" == *"状态：已启用"* ]]
+  [[ "$node_list_output" == *"状态：已暂停（原链接已保留）"* ]]
 
   quiet_test_dir="$fixture_dir/quiet"
   mkdir -p "$quiet_test_dir"
@@ -563,10 +635,21 @@ for required in \
   'inboundTag: ["vless-in"]' \
   'nextNodeNumber' \
   'schema: 2' \
+  'CURRENT_STATE_SCHEMA=2' \
   'LEGACY_MANAGER_BIN="/usr/local/sbin/xray-chain"' \
   'MANAGER_BIN="/usr/local/sbin/puppyip"' \
   'XRAY_CHAIN_UDP_MODE:-proxy' \
   '更换线路的 SOCKS5 或 UDP 设置' \
+  '暂停或启用线路' \
+  'set_node_enabled_in_model' \
+  'command_pause' \
+  'command_resume' \
+  'command_upgrade' \
+  'handle_existing_remote_run' \
+  'assert_upgrade_invariants' \
+  'canonical_runtime_identity' \
+  '候选配置未完整保留 SOCKS5 凭据' \
+  '脚本不会自动重新安装' \
   'if ! running_as_installed_manager; then' \
   'if installation_complete; then pause_menu; else exit 0; fi' \
   'rollback_backup'; do
@@ -581,8 +664,13 @@ if grep -Fq '请输入 UNINSTALL 确认' "$SCRIPT"; then
   exit 1
 fi
 
-if grep -Fq '9) command_uninstall; exit 0 ;;' "$SCRIPT"; then
+if grep -Fq '10) command_uninstall; exit 0 ;;' "$SCRIPT"; then
   printf '取消卸载后不应直接退出管理菜单。\n' >&2
+  exit 1
+fi
+
+if grep -Fq '检测到已有线路，现在直接添加新线路' "$SCRIPT"; then
+  printf '重复执行一键命令不应再自动进入新增节点流程。\n' >&2
   exit 1
 fi
 

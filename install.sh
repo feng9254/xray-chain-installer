@@ -5,7 +5,8 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="0.2.12"
+SCRIPT_VERSION="0.2.13"
+CURRENT_STATE_SCHEMA=2
 SERVICE_NAME="xray-chain.service"
 RUNTIME_USER="xray-chain"
 RUNTIME_GROUP="xray-chain"
@@ -770,12 +771,12 @@ prompt_default() {
 }
 
 prompt_yes_no() {
-  local variable="$1" label="$2" default_value="$3" answer suffix
+  local variable="$1" label="$2" default_value="$3" input_answer suffix
   if [[ "$default_value" == "yes" ]]; then suffix='[Y/n]'; else suffix='[y/N]'; fi
   while true; do
-    if ! read -r -p "${label} ${suffix}: " answer; then answer=''; fi
-    answer="${answer:-$default_value}"
-    case "${answer,,}" in
+    if ! read -r -p "${label} ${suffix}: " input_answer; then input_answer=''; fi
+    input_answer="${input_answer:-$default_value}"
+    case "${input_answer,,}" in
       y|yes|是)
         printf -v "$variable" 'yes'
         return 0
@@ -1313,6 +1314,7 @@ validate_model() {
       and (.shortId | type == "string" and test("^[0-9A-Fa-f]{2,16}$") and (length % 2 == 0))
       and (.spiderX | type == "string" and startswith("/") and length <= 256)
       and (.udpMode == "block" or .udpMode == "proxy")
+      and (.enabled | type == "boolean")
       and ((.type // "socks") == "socks" or (.type // "socks") == "direct")
       and (
         if (.type // "socks") == "socks" then
@@ -1359,7 +1361,10 @@ load_model() {
 
   private_key="$(jq -er '.inbounds[] | select(.tag == "vless-in") | .streamSettings.realitySettings.privateKey' "$CONFIG_FILE" 2>/dev/null || true)"
   if [[ "$schema" == '2' ]]; then
-    jq '.nodes |= map(. + {type: (.type // "socks")})' "$STATE_FILE" >"$MODEL_FILE"
+    jq '.nodes |= map(. + {
+      type: (.type // "socks"),
+      enabled: (if has("enabled") then .enabled else true end)
+    })' "$STATE_FILE" >"$MODEL_FILE"
     jq -n --slurpfile state "$MODEL_FILE" --slurpfile config "$CONFIG_FILE" '
       reduce ($state[0].nodes[] | select((.type // "socks") == "socks")) as $node ({};
         . + {($node.id):
@@ -1372,10 +1377,7 @@ load_model() {
   elif [[ "$schema" == '1' ]]; then
     legacy_pass="$(jq -er '.outbounds[] | select(.tag == "socks-out") | .settings.pass // ""' "$CONFIG_FILE" 2>/dev/null || true)"
     jq -n \
-      --slurpfile old "$STATE_FILE" \
-      --arg bad_target "$KNOWN_BAD_REALITY_TARGET" \
-      --arg default_target "$DEFAULT_REALITY_TARGET" \
-      --arg default_sni "${DEFAULT_REALITY_TARGET%:*}" '
+      --slurpfile old "$STATE_FILE" '
       ($old[0]) as $o
       | {
           schema: 2,
@@ -1385,8 +1387,8 @@ load_model() {
           xrayVersion: ($o.xrayVersion // "unknown"),
           serverAddress: $o.serverAddress,
           inboundPort: $o.inboundPort,
-          realityTarget: (if $o.realityTarget == $bad_target then $default_target else $o.realityTarget end),
-          serverName: (if $o.realityTarget == $bad_target then $default_sni else $o.serverName end),
+          realityTarget: $o.realityTarget,
+          serverName: $o.serverName,
           realityPublicKey: $o.publicKey,
           nextNodeNumber: 2,
           nodes: [
@@ -1399,6 +1401,7 @@ load_model() {
               shortId: $o.shortId,
               spiderX: "/",
               udpMode: ($o.udpMode // "block"),
+              enabled: true,
               type: "socks",
               socksHost: $o.socksHost,
               socksPort: $o.socksPort,
@@ -1520,6 +1523,7 @@ append_current_node_to_model() {
         shortId: $short_id,
         spiderX: $spider_x,
         udpMode: $udp_mode,
+        enabled: true,
         type: $type,
         socksHost: $socks_host,
         socksPort: $socks_port,
@@ -1682,6 +1686,19 @@ rotate_node_identity_in_model() {
   validate_model "$MODEL_FILE"
 }
 
+set_node_enabled_in_model() {
+  local node_id="$1" enabled="$2" model_tmp
+  [[ "$enabled" == 'true' || "$enabled" == 'false' ]] \
+    || die "节点状态必须是 true 或 false。"
+  model_tmp="${MODEL_FILE}.new"
+  jq --arg id "$node_id" --argjson enabled "$enabled" '
+      (.nodes[] | select(.id == $id) | .enabled) = $enabled
+    ' "$MODEL_FILE" >"$model_tmp"
+  mv -f -- "$model_tmp" "$MODEL_FILE"
+  chmod 0600 "$MODEL_FILE"
+  validate_model "$MODEL_FILE"
+}
+
 remove_node_from_model() {
   local node_id="$1" model_tmp secrets_tmp
   (( $(jq '.nodes | length' "$MODEL_FILE") > 1 )) \
@@ -1785,7 +1802,16 @@ render_config() {
           ]
           + [
               $s.nodes[]
-              | select(.udpMode == "block")
+              | select(.enabled == false)
+              | {
+                  type: "field",
+                  user: [.email],
+                  outboundTag: "blocked"
+                }
+            ]
+          + [
+              $s.nodes[]
+              | select(.enabled != false and .udpMode == "block")
               | {
                   type: "field",
                   user: [.email],
@@ -1795,6 +1821,7 @@ render_config() {
             ]
           + [
               $s.nodes[]
+              | select(.enabled != false)
               | {
                   type: "field",
                   user: [.email],
@@ -1832,6 +1859,204 @@ render_state() {
       | .xrayVersion = $xray_version
     ' "$MODEL_FILE" >"$output"
   chmod 0600 "$output"
+}
+
+canonical_state_identity() {
+  local file="$1"
+  jq -cS '
+    def normalized_enabled:
+      if has("enabled") then .enabled else true end;
+    if (.schema // 1) == 2 then
+      {
+        serverAddress,
+        inboundPort,
+        realityTarget,
+        serverName,
+        realityPublicKey,
+        nextNodeNumber,
+        nodes: ([
+          .nodes[]
+          | {
+              id,
+              number,
+              name,
+              email,
+              uuid,
+              shortId,
+              spiderX,
+              udpMode,
+              enabled: normalized_enabled,
+              type: (.type // "socks"),
+              socksHost,
+              socksPort,
+              socksUser,
+              exitIp
+            }
+        ] | sort_by(.number))
+      }
+    else
+      . as $old
+      | {
+          serverAddress: $old.serverAddress,
+          inboundPort: $old.inboundPort,
+          realityTarget: $old.realityTarget,
+          serverName: $old.serverName,
+          realityPublicKey: $old.publicKey,
+          nextNodeNumber: 2,
+          nodes: [{
+            id: "node-1",
+            number: 1,
+            name: ($old.nodeName // "PuppyIP-1"),
+            email: "node-1@puppyip.local",
+            uuid: $old.uuid,
+            shortId: $old.shortId,
+            spiderX: "/",
+            udpMode: ($old.udpMode // "block"),
+            enabled: true,
+            type: "socks",
+            socksHost: $old.socksHost,
+            socksPort: $old.socksPort,
+            socksUser: ($old.socksUser // ""),
+            exitIp: ""
+          }]
+        }
+    end
+  ' "$file"
+}
+
+canonical_config_secrets() {
+  local state_file="$1" config_file="$2"
+  jq -cS -n --slurpfile state "$state_file" --slurpfile config "$config_file" '
+    ($state[0]) as $s
+    | ($config[0]) as $c
+    | def password_for($tag):
+        ([ $c.outbounds[]?
+           | select(.tag == $tag)
+           | (.settings.pass // "") ][0] // "__missing_outbound__");
+      if ($s.schema // 1) == 2 then
+        reduce ($s.nodes[] | select((.type // "socks") == "socks")) as $node ({};
+          . + {($node.id): password_for("socks-out-" + $node.id)}
+        )
+      else
+        {"node-1": password_for("socks-out")}
+      end
+  '
+}
+
+canonical_runtime_identity() {
+  local state_file="$1" config_file="$2"
+  jq -cS -n --slurpfile state "$state_file" --slurpfile config "$config_file" '
+    ($state[0]) as $s
+    | ($config[0]) as $c
+    | def normalized_nodes($source):
+        if ($source.schema // 1) == 2 then
+          $source.nodes
+        else
+          [{
+            id: "node-1",
+            number: 1,
+            type: "socks"
+          }]
+        end;
+      def outbound_tag($schema; $node):
+        if $schema == 2 then
+          if ($node.type // "socks") == "direct" then
+            "direct-out-" + $node.id
+          else
+            "socks-out-" + $node.id
+          end
+        else
+          "socks-out"
+        end;
+      (($s.schema // 1) == 2) as $schema2
+    | (if $schema2 then 2 else 1 end) as $schema
+    | (normalized_nodes($s)) as $nodes
+    | ([ $c.inbounds[]? | select(.tag == "vless-in") ][0] // {}) as $inbound
+    | ([ $nodes[] | outbound_tag($schema; .) ]) as $expected_outbound_tags
+    | {
+        inbound: {
+          matchCount: ([ $c.inbounds[]? | select(.tag == "vless-in") ] | length),
+          listen: ($inbound.listen // ""),
+          port: ($inbound.port // null),
+          protocol: ($inbound.protocol // ""),
+          clients: ([
+            $inbound.settings.clients[]?
+            | {id: (.id // ""), flow: (.flow // "")}
+          ] | sort_by(.id, .flow)),
+          network: ($inbound.streamSettings.network // ""),
+          security: ($inbound.streamSettings.security // ""),
+          target: ($inbound.streamSettings.realitySettings.target // ""),
+          serverNames: (($inbound.streamSettings.realitySettings.serverNames // []) | sort),
+          privateKey: ($inbound.streamSettings.realitySettings.privateKey // ""),
+          shortIds: (($inbound.streamSettings.realitySettings.shortIds // []) | sort)
+        },
+        nodeOutbounds: ([
+          $nodes[] as $node
+          | (outbound_tag($schema; $node)) as $tag
+          | ([ $c.outbounds[]? | select(.tag == $tag) ][0] // {}) as $outbound
+          | {
+              id: $node.id,
+              matchCount: ([ $c.outbounds[]? | select(.tag == $tag) ] | length),
+              protocol: ($outbound.protocol // ""),
+              address: ($outbound.settings.address // ""),
+              port: ($outbound.settings.port // 0),
+              user: ($outbound.settings.user // ""),
+              domainStrategy: ($outbound.settings.domainStrategy // "")
+            }
+        ] | sort_by(.id)),
+        extraInbounds: ([
+          $c.inbounds[]? | select((.tag // "") != "vless-in")
+        ] | sort_by(.tag // "")),
+        extraOutbounds: ([
+          $c.outbounds[]?
+          | select((.tag // "") != "blocked")
+          | select(([ $expected_outbound_tags[] == (.tag // "") ] | any) | not)
+        ] | sort_by(.tag // ""))
+      }
+  '
+}
+
+config_reality_private_key() {
+  local config_file="$1"
+  jq -er '
+    .inbounds[]
+    | select(.tag == "vless-in")
+    | .streamSettings.realitySettings.privateKey
+  ' "$config_file"
+}
+
+assert_upgrade_invariants() {
+  local old_state="$1" old_config="$2" candidate_state="$3" candidate_config="$4"
+  local old_identity new_identity old_runtime new_runtime
+  local old_secrets new_secrets old_private_key new_private_key
+
+  old_identity="$(canonical_state_identity "$old_state")" \
+    || die "无法读取升级前的节点身份；为防止覆盖，已停止更新。"
+  new_identity="$(canonical_state_identity "$candidate_state")" \
+    || die "无法读取候选节点身份；为防止覆盖，已停止更新。"
+  [[ "$old_identity" == "$new_identity" ]] \
+    || die "候选配置改变了端口、节点身份、出口或 REALITY 参数；已停止更新，现有服务未修改。"
+
+  old_runtime="$(canonical_runtime_identity "$old_state" "$old_config")" \
+    || die "无法核对升级前的 Xray 运行配置；已停止更新。"
+  new_runtime="$(canonical_runtime_identity "$candidate_state" "$candidate_config")" \
+    || die "无法核对候选 Xray 运行配置；已停止更新。"
+  [[ "$old_runtime" == "$new_runtime" ]] \
+    || die "现有状态与 Xray 运行配置不一致，或候选配置会改变节点行为；为防止覆盖，已停止更新。"
+
+  old_secrets="$(canonical_config_secrets "$old_state" "$old_config")" \
+    || die "无法核对升级前的 SOCKS5 凭据；已停止更新。"
+  new_secrets="$(canonical_config_secrets "$candidate_state" "$candidate_config")" \
+    || die "无法核对候选 SOCKS5 凭据；已停止更新。"
+  [[ "$old_secrets" == "$new_secrets" ]] \
+    || die "候选配置未完整保留 SOCKS5 凭据；已停止更新，现有服务未修改。"
+
+  old_private_key="$(config_reality_private_key "$old_config")" \
+    || die "无法读取升级前的 REALITY 私钥；已停止更新。"
+  new_private_key="$(config_reality_private_key "$candidate_config")" \
+    || die "无法读取候选 REALITY 私钥；已停止更新。"
+  [[ "$old_private_key" == "$new_private_key" ]] \
+    || die "候选配置改变了 REALITY 私钥；已停止更新，现有服务未修改。"
 }
 
 render_service() {
@@ -1876,6 +2101,23 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
   chmod 0644 "$output"
+}
+
+prepare_existing_upgrade_candidate() {
+  local work_dir="$1" version="$2"
+  load_model "$work_dir" "${work_dir}/xray/xray"
+  render_state "${work_dir}/candidate-state.json" "$version"
+  assert_model_port_available "${work_dir}/candidate-state.json"
+  render_config "${work_dir}/candidate-config.json" "$work_dir" \
+    "${work_dir}/candidate-state.json" "$SECRETS_FILE"
+  render_service "${work_dir}/xray-chain.service"
+  validate_config "${work_dir}/xray/xray" "${work_dir}/xray" \
+    "${work_dir}/candidate-config.json"
+  assert_upgrade_invariants "$STATE_FILE" "$CONFIG_FILE" \
+    "${work_dir}/candidate-state.json" "${work_dir}/candidate-config.json"
+  if ! prepare_manager_copy "${work_dir}/manager"; then
+    die "无法取得并校验当前安装脚本的固定提交副本；现有节点和服务未修改。"
+  fi
 }
 
 resolve_installer_commit() {
@@ -2212,13 +2454,13 @@ print_node_list_file() {
     jq -r '
       .nodes[] |
       if (.type // "socks") == "direct" then
-        "  \(.number)) \(.name)\n     出口：VPS 本机直连 · 公网 IPv4：\(.exitIp)"
+        "  \(.number)) \(.name)\n     状态：\(if .enabled == false then "已暂停（原链接已保留）" else "已启用" end)\n     出口：VPS 本机直连 · 公网 IPv4：\(.exitIp)"
       else
-        "  \(.number)) \(.name)\n     SOCKS5：\(.socksHost):\(.socksPort) · 实际出口：\(if .exitIp == "" then "未验证" else .exitIp end)"
+        "  \(.number)) \(.name)\n     状态：\(if .enabled == false then "已暂停（原链接已保留）" else "已启用" end)\n     SOCKS5：\(.socksHost):\(.socksPort) · 实际出口：\(if .exitIp == "" then "未验证" else .exitIp end)"
       end
     ' "$file"
   else
-    jq -r '"  1) \(.nodeName)\n     SOCKS5：\(.socksHost):\(.socksPort) · 实际出口：旧版未记录"' "$file"
+    jq -r '"  1) \(.nodeName)\n     状态：已启用\n     SOCKS5：\(.socksHost):\(.socksPort) · 实际出口：旧版未记录"' "$file"
   fi
 }
 
@@ -2275,17 +2517,35 @@ node_outbound_type() {
   fi
 }
 
+node_enabled() {
+  local node_id="$1" schema
+  schema="$(jq -r '.schema // 1' "$STATE_FILE")"
+  if [[ "$schema" == '2' ]]; then
+    jq -er --arg id "$node_id" '
+      .nodes[] | select(.id == $id) | if .enabled == false then "false" else "true" end
+    ' "$STATE_FILE"
+  else
+    printf 'true'
+  fi
+}
+
 show_connection() {
-  local selector="${1:-}" footer="${2:-yes}" link udp_mode node_id outbound_type exit_ip
+  local selector="${1:-}" footer="${2:-yes}" link udp_mode node_id outbound_type exit_ip enabled
   select_node_id "$STATE_FILE" "$selector"
   node_id="$SELECTED_NODE_ID"
   link="$(build_share_link "$node_id")"
   udp_mode="$(node_udp_mode "$node_id")"
   outbound_type="$(node_outbound_type "$node_id")"
-  printf '\n%s客户端导入链接 · %s%s\n%s\n\n' "$C_BOLD" \
+  enabled="$(node_enabled "$node_id")"
+  printf '\n%s客户端导入链接 · %s%s\n' "$C_BOLD" \
     "$(jq -r --arg id "$node_id" \
       'if (.schema // 1) == 2 then (.nodes[] | select(.id == $id) | .name) else .nodeName end' "$STATE_FILE")" \
-    "$C_RESET" "$link"
+    "$C_RESET"
+  if [[ "$enabled" == 'false' ]]; then
+    printf '%s状态：已暂停；原链接和二维码已保留，重新启用后无需重新导入。%s\n' \
+      "$C_YELLOW" "$C_RESET"
+  fi
+  printf '%s\n\n' "$link"
   if command -v qrencode >/dev/null 2>&1 && [[ -t 1 ]]; then
     qrencode -t ANSIUTF8 "$link" || true
   fi
@@ -2341,6 +2601,121 @@ print_firewall_hint() {
   warn "还要在云厂商安全组中放行 ${port}/tcp（脚本不会自动修改防火墙）。"
 }
 
+script_version_from_file() {
+  local file="$1"
+  [[ -r "$file" ]] || return 0
+  awk -F'"' '/^SCRIPT_VERSION="[^"]+"$/ {print $2; exit}' "$file"
+}
+
+semantic_version_is_newer() {
+  local left="${1#v}" right="${2#v}" index
+  local -a left_parts right_parts
+  [[ "$left" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ \
+    && "$right" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  IFS='.' read -r -a left_parts <<<"$left"
+  IFS='.' read -r -a right_parts <<<"$right"
+  for index in 0 1 2; do
+    if (( 10#${left_parts[$index]} > 10#${right_parts[$index]} )); then
+      return 0
+    fi
+    if (( 10#${left_parts[$index]} < 10#${right_parts[$index]} )); then
+      return 1
+    fi
+  done
+  return 1
+}
+
+installed_state_version() {
+  jq -r '.installerVersion // "unknown"' "$STATE_FILE" 2>/dev/null || printf 'unknown'
+}
+
+installed_state_schema() {
+  jq -r '.schema // 1' "$STATE_FILE" 2>/dev/null || printf 'unknown'
+}
+
+installed_manager_version() {
+  local file="$1" version
+  version="$(script_version_from_file "$file")"
+  printf '%s' "${version:-missing}"
+}
+
+assert_upgrade_not_downgrade() {
+  local installed_version
+  for installed_version in \
+    "$(installed_state_version)" \
+    "$(installed_manager_version "$MANAGER_BIN")" \
+    "$(installed_manager_version "$LEGACY_MANAGER_BIN")"; do
+    if semantic_version_is_newer "$installed_version" "$SCRIPT_VERSION"; then
+      die "检测到现有版本 ${installed_version} 比当前脚本 ${SCRIPT_VERSION} 更新；为防止降级破坏节点，已停止操作。请使用仓库 main 的最新一键命令。"
+    fi
+  done
+}
+
+installation_upgrade_needed() {
+  [[ "$(installed_state_schema)" == "$CURRENT_STATE_SCHEMA" \
+    && "$(installed_state_version)" == "$SCRIPT_VERSION" \
+    && "$(installed_manager_version "$MANAGER_BIN")" == "$SCRIPT_VERSION" \
+    && "$(installed_manager_version "$LEGACY_MANAGER_BIN")" == "$SCRIPT_VERSION" ]] \
+    && return 1
+  return 0
+}
+
+command_upgrade() {
+  local work_dir version
+  refresh_brand_banner
+  require_root
+  check_platform
+  require_systemd
+  installation_complete || die "现有安装不完整；为防止覆盖旧节点，不能自动升级。请先备份 /etc/xray-chain 和 /var/lib/xray-chain。"
+  assert_upgrade_not_downgrade
+  acquire_lock
+  new_temp_dir
+  work_dir="$LAST_TEMP_DIR"
+  show_progress_line 1 3 "检查依赖并读取现有安装"
+  install_dependencies "$work_dir"
+  stage_installed_xray "$work_dir" \
+    || die "现有 Xray-core 或 Geo 数据不完整；为防止覆盖旧节点，已停止更新。"
+  version="$(<"${work_dir}/xray-version")"
+  show_progress_line 2 3 "迁移并核对全部节点与凭据"
+  prepare_existing_upgrade_candidate "$work_dir" "$version"
+  show_progress_line 3 3 "备份并安全应用当前版本"
+  finish_progress_line
+  info "节点身份、端口、REALITY 密钥和 SOCKS5 凭据核对通过。"
+  ensure_runtime_layout
+  deploy_full "$work_dir" yes
+  configure_bbr
+  info "PuppyIP Chain 已原地更新到 ${SCRIPT_VERSION}；现有链接和二维码无需重新导入。"
+  print_node_list_file "$STATE_FILE"
+}
+
+handle_existing_remote_run() {
+  local answer state_version manager_version schema
+  show_brand_banner
+  require_root
+  check_platform
+  require_systemd
+  assert_upgrade_not_downgrade
+  state_version="$(installed_state_version)"
+  manager_version="$(installed_manager_version "$MANAGER_BIN")"
+  schema="$(installed_state_schema)"
+
+  if ! installation_upgrade_needed; then
+    info "当前已是 PuppyIP Chain ${SCRIPT_VERSION}，不会重新安装或新增节点。"
+    print_node_list_file "$STATE_FILE"
+    info "新增线路请执行 puppyip add；其他管理请执行 puppyip。"
+    return 0
+  fi
+
+  warn "检测到现有安装：状态版本 ${state_version} · 管理脚本 ${manager_version} · schema ${schema}。"
+  printf '本次只做原地更新：保留监听端口、全部节点、链接、二维码、REALITY 密钥和 SOCKS5 凭据。\n'
+  prompt_yes_no answer "是否更新到 PuppyIP Chain ${SCRIPT_VERSION}？" yes
+  if [[ "$answer" != 'yes' ]]; then
+    info "已取消更新，现有节点和服务未修改。"
+    return 0
+  fi
+  command_upgrade
+}
+
 command_install() {
   local work_dir version manager_ready='no'
   show_brand_banner
@@ -2348,27 +2723,21 @@ command_install() {
   check_platform
   require_systemd
   if installation_complete; then
-    acquire_lock
-    new_temp_dir
-    work_dir="$LAST_TEMP_DIR"
-    info "正在同步管理命令并检查 BBR..."
-    install_dependencies "$work_dir"
-    if prepare_manager_copy "${work_dir}/manager"; then
-      if atomic_install "${work_dir}/manager" "$MANAGER_BIN" 0755 root root \
-        && atomic_install "${work_dir}/manager" "$LEGACY_MANAGER_BIN" 0755 root root; then
-        info "管理命令已同步到当前安装脚本版本 ${SCRIPT_VERSION}。"
-      else
-        warn "管理命令同步失败；现有节点和服务未受影响。"
-      fi
+    assert_upgrade_not_downgrade
+    if installation_upgrade_needed; then
+      command_upgrade
     else
-      warn "无法取得当前安装脚本副本；现有管理命令保持不变。"
+      configure_bbr
+      info "当前已是 PuppyIP Chain ${SCRIPT_VERSION}，现有节点和服务未修改。"
+      print_node_list_file "$STATE_FILE"
     fi
-    configure_bbr
-    warn "PuppyIP Chain 已安装；新增或修改出口请直接输入 puppyip 打开菜单。"
-    print_node_list_file "$STATE_FILE"
     return
   fi
-  if [[ -e "$STATE_FILE" || -e "$CONFIG_FILE" || -e "$XRAY_BIN" || -e "$SERVICE_FILE" ]]; then
+  if [[ -e "$STATE_FILE" || -e "$CONFIG_FILE" ]]; then
+    warn "检测到旧状态或配置，但安装组件不完整。"
+    die "为防止覆盖现有节点，脚本不会自动重新安装。请先备份 /etc/xray-chain 和 /var/lib/xray-chain，再检查缺失组件。"
+  fi
+  if [[ -e "$XRAY_BIN" || -e "$SERVICE_FILE" ]]; then
     warn "检测到不完整的旧安装；继续后会备份残留文件并重新安装。"
     confirm_continue "确认修复安装吗？"
   fi
@@ -2477,6 +2846,77 @@ command_edit() {
   show_connection "$SELECTED_NODE_ID"
 }
 
+command_set_enabled() {
+  local selector="${1:-}" requested="$2" ask_confirmation="${3:-no}"
+  local work_dir version node_name node_number current target action prompt
+  refresh_brand_banner
+  require_root
+  check_platform
+  require_systemd
+  acquire_lock
+  new_temp_dir
+  work_dir="$LAST_TEMP_DIR"
+  prepare_existing_operation "$work_dir"
+  select_node_id "$MODEL_FILE" "$selector"
+  node_name="$(jq -er --arg id "$SELECTED_NODE_ID" '.nodes[] | select(.id == $id) | .name' "$MODEL_FILE")"
+  node_number="$(jq -er --arg id "$SELECTED_NODE_ID" '.nodes[] | select(.id == $id) | .number' "$MODEL_FILE")"
+  current="$(jq -er --arg id "$SELECTED_NODE_ID" \
+    '.nodes[] | select(.id == $id) | .enabled | tostring' "$MODEL_FILE")"
+
+  case "$requested" in
+    pause) target='false' ;;
+    resume) target='true' ;;
+    toggle)
+      if [[ "$current" == 'true' ]]; then target='false'; else target='true'; fi
+      ;;
+    *) die "未知线路状态操作：${requested}" ;;
+  esac
+
+  if [[ "$target" == 'false' ]]; then
+    action='暂停'
+    prompt="确认暂停 ${node_name}？原链接会保留，暂停期间无法使用。"
+  else
+    action='启用'
+    prompt="确认启用 ${node_name}？启用后继续使用原链接。"
+  fi
+
+  if [[ "$current" == "$target" ]]; then
+    info "${node_name} 已处于${action}状态，无需重复操作。"
+    print_node_list_file "$MODEL_FILE"
+    return 0
+  fi
+
+  if [[ "$ask_confirmation" == 'yes' ]] && ! confirm_destructive_action "$prompt"; then
+    info "已取消${action}。"
+    return 0
+  fi
+
+  version="$(jq -er '.xrayVersion' "$MODEL_FILE")"
+  set_node_enabled_in_model "$SELECTED_NODE_ID" "$target"
+  info "正在校验并应用线路状态；其他线路可能短暂重连..."
+  deploy_model_change "$work_dir" "$version"
+  refresh_brand_banner
+  if [[ "$target" == 'false' ]]; then
+    info "已暂停 ${node_name}；原链接、二维码和节点凭据均已保留。"
+    info "需要恢复时执行：puppyip resume ${node_number}"
+  else
+    info "已启用 ${node_name}；原链接和二维码无需重新导入。"
+  fi
+  print_node_list_file "$STATE_FILE"
+}
+
+command_pause() {
+  command_set_enabled "${1:-}" pause no
+}
+
+command_resume() {
+  command_set_enabled "${1:-}" resume no
+}
+
+command_toggle_enabled() {
+  command_set_enabled "${1:-}" toggle yes
+}
+
 command_remove() {
   local selector="${1:-}" assume_yes="${2:-}" work_dir version node_name
   refresh_brand_banner
@@ -2529,15 +2969,18 @@ command_reset() {
 }
 
 command_status() {
-  local version_output node_count port service_state validation_log tcp_cc default_qdisc
+  local version_output node_count enabled_count paused_count port service_state validation_log tcp_cc default_qdisc
   require_root
   [[ -x "$XRAY_BIN" && -r "$CONFIG_FILE" && -r "$STATE_FILE" ]] || die "PuppyIP Chain 尚未安装。"
   version_output="$($XRAY_BIN version)"
   if [[ "$(jq -r '.schema // 1' "$STATE_FILE")" == '2' ]]; then
     node_count="$(jq '.nodes | length' "$STATE_FILE")"
+    enabled_count="$(jq '[.nodes[] | select(.enabled != false)] | length' "$STATE_FILE")"
   else
     node_count='1'
+    enabled_count='1'
   fi
+  paused_count="$((node_count - enabled_count))"
   port="$(jq -r '.inboundPort' "$STATE_FILE")"
   service_state="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
   tcp_cc="$(read_sysctl_value net.ipv4.tcp_congestion_control)"
@@ -2546,7 +2989,8 @@ command_status() {
   default_qdisc="${default_qdisc:-unknown}"
   printf '\n%sPuppyIP Chain 状态%s\n' "$C_BOLD" "$C_RESET"
   printf '  核心：%s\n' "${version_output%%$'\n'*}"
-  printf '  服务：%s\n  节点：%s\n  入口：%s/tcp\n' "$service_state" "$node_count" "$port"
+  printf '  服务：%s\n  节点：%s（启用 %s · 暂停 %s）\n  入口：%s/tcp\n' \
+    "$service_state" "$node_count" "$enabled_count" "$paused_count" "$port"
   printf '  TCP：%s · qdisc %s\n' "$tcp_cc" "$default_qdisc"
   new_temp_dir
   validation_log="${LAST_TEMP_DIR}/status-validation.log"
@@ -2565,60 +3009,30 @@ command_logs() {
 }
 
 command_update() {
-  local work_dir version backup_path state_tmp manager_ready='no'
+  local work_dir version
   refresh_brand_banner
   require_root
   check_platform
   require_systemd
-  [[ -r "$CONFIG_FILE" && -r "$STATE_FILE" ]] || die "请先安装 PuppyIP Chain。"
+  installation_complete \
+    || die "现有安装不完整；为防止覆盖旧节点，不能自动更新 Xray。请先备份 /etc/xray-chain 和 /var/lib/xray-chain。"
+  assert_upgrade_not_downgrade
   acquire_lock
   new_temp_dir
   work_dir="$LAST_TEMP_DIR"
-  show_progress_line 1 3 "检查系统并准备依赖"
+  show_progress_line 1 4 "检查依赖并读取现有安装"
   install_dependencies "$work_dir"
   XRAY_VERSION="${XRAY_VERSION:-latest}" download_xray "$work_dir"
   version="$(<"${work_dir}/xray-version")"
-  show_progress_line 3 3 "验证新版并安全更新服务"
-  validate_config "${work_dir}/xray/xray" "${work_dir}/xray" "$CONFIG_FILE"
-  state_tmp="${work_dir}/state-updated.json"
-  jq --arg version "$version" --arg now "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-    --arg installer_version "$SCRIPT_VERSION" \
-    '.xrayVersion = $version | .updatedAt = $now | .installerVersion = $installer_version' \
-    "$STATE_FILE" >"$state_tmp"
-  if prepare_manager_copy "${work_dir}/manager"; then manager_ready='yes'; fi
+  show_progress_line 3 4 "迁移并核对全部节点与凭据"
+  prepare_existing_upgrade_candidate "$work_dir" "$version"
+  show_progress_line 4 4 "备份并安全更新 Xray-core"
+  finish_progress_line
+  info "节点身份、端口、REALITY 密钥和 SOCKS5 凭据核对通过。"
   ensure_runtime_layout
-  if ! backup_path="$(create_backup)"; then
-    cleanup_runtime_layout_created_this_run
-    die "无法创建更新前备份，未修改现有服务。"
-  fi
-
-  if ! atomic_install "${work_dir}/xray/xray" "$XRAY_BIN" 0755 root root \
-    || ! atomic_install "${work_dir}/xray/geoip.dat" "${ASSET_DIR}/geoip.dat" 0644 root root \
-    || ! atomic_install "${work_dir}/xray/geosite.dat" "${ASSET_DIR}/geosite.dat" 0644 root root \
-    || ! atomic_install "$state_tmp" "$STATE_FILE" 0600 root root; then
-    rollback_backup "$backup_path"
-    die "Xray 文件更新失败，已回滚。"
-  fi
-  if [[ "$manager_ready" == 'yes' ]]; then
-    if ! atomic_install "${work_dir}/manager" "$MANAGER_BIN" 0755 root root \
-      || ! atomic_install "${work_dir}/manager" "$LEGACY_MANAGER_BIN" 0755 root root; then
-      rollback_backup "$backup_path"
-      die "管理命令更新失败，已回滚。"
-    fi
-  fi
-  if ! systemctl restart "$SERVICE_NAME" >/dev/null 2>&1; then
-    rollback_backup "$backup_path"
-    die "Xray 更新后重启失败，已回滚。"
-  fi
-  sleep 1
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    rollback_backup "$backup_path"
-    die "新版 Xray 未保持运行，已回滚。"
-  fi
-  commit_runtime_layout
+  deploy_full "$work_dir" yes
   configure_bbr
-
-  info "Xray-core 已更新到 ${version}。"
+  info "Xray-core 已更新到 ${version}；全部现有节点和链接保持不变。"
 }
 
 command_uninstall() {
@@ -2668,24 +3082,28 @@ command_uninstall() {
 }
 
 show_menu() {
-  local node_count='0'
+  local node_count='0' enabled_count='0'
   if [[ -r "$STATE_FILE" ]]; then
     if [[ "$(jq -r '.schema // 1' "$STATE_FILE")" == '2' ]]; then
       node_count="$(jq '.nodes | length' "$STATE_FILE")"
+      enabled_count="$(jq '[.nodes[] | select(.enabled != false)] | length' "$STATE_FILE")"
     else
       node_count='1'
+      enabled_count='1'
     fi
   fi
-  printf '\n%sPuppyIP Chain 简易管理%s · 已有 %s 条线路\n' "$C_BOLD" "$C_RESET" "$node_count"
+  printf '\n%sPuppyIP Chain 简易管理%s · 共 %s 条线路，%s 条启用\n' \
+    "$C_BOLD" "$C_RESET" "$node_count" "$enabled_count"
   printf '  1) 新增本机直连或批量 SOCKS5 出口\n'
   printf '  2) 查看线路、链接和二维码\n'
   printf '  3) 更换线路的 SOCKS5 或 UDP 设置\n'
-  printf '  4) 删除线路\n'
-  printf '  5) 重新生成线路链接（旧链接会失效）\n'
-  printf '  6) 检查是否正常运行\n'
-  printf '  7) 查看运行日志\n'
-  printf '  8) 更新 Xray 程序\n'
-  printf '  9) 卸载 PuppyIP Chain\n'
+  printf '  4) 暂停或启用线路\n'
+  printf '  5) 删除线路\n'
+  printf '  6) 重新生成线路链接（旧链接会失效）\n'
+  printf '  7) 检查是否正常运行\n'
+  printf '  8) 查看运行日志\n'
+  printf '  9) 更新 Xray 程序\n'
+  printf ' 10) 卸载 PuppyIP Chain\n'
   printf '  0) 退出\n'
 }
 
@@ -2706,9 +3124,13 @@ usage() {
   sudo puppyip list                    查看节点摘要
   sudo puppyip show [all|节点编号]     显示链接和二维码
   sudo puppyip edit [节点编号]         修改 SOCKS5 / UDP 策略
+  sudo puppyip pause [节点编号]        暂停节点并保留原链接
+  sudo puppyip resume [节点编号]       启用节点并恢复原链接
   sudo puppyip remove [节点编号]       删除节点
   sudo puppyip reset [节点编号]        重置节点凭据
-  sudo puppyip status|logs|update
+  sudo puppyip upgrade                 原地迁移并更新管理脚本
+  sudo puppyip update                  更新 Xray-core 并安全迁移状态
+  sudo puppyip status|logs
   sudo puppyip uninstall
 
 兼容命令：sudo xray-chain
@@ -2739,8 +3161,11 @@ main() {
     list) command_list ;;
     show) shift; command_show "${1:-}" ;;
     edit|reconfigure) shift; command_edit "${1:-}" ;;
+    pause) shift; command_pause "${1:-}" ;;
+    resume|enable) shift; command_resume "${1:-}" ;;
     remove|delete) shift; command_remove "${1:-}" "${2:-}" ;;
     reset) shift; command_reset "${1:-}" "${2:-}" ;;
+    upgrade) command_upgrade ;;
     status) command_status ;;
     logs) command_logs ;;
     update) command_update ;;
@@ -2755,15 +3180,13 @@ main() {
         return
       fi
       if ! running_as_installed_manager; then
-        refresh_brand_banner
-        info "检测到已有线路，现在直接添加新线路；其他功能请输入 puppyip。"
-        command_add
+        handle_existing_remote_run
         return
       fi
       show_brand_banner
       while true; do
         show_menu
-        if ! read -r -p '请选择要做的操作 [0-9]: ' command; then
+        if ! read -r -p '请选择要做的操作 [0-10]: ' command; then
           printf '\n'
           exit 0
         fi
@@ -2771,12 +3194,13 @@ main() {
           1) command_add; pause_menu ;;
           2) command_show all; pause_menu ;;
           3) command_edit; pause_menu ;;
-          4) command_remove; pause_menu ;;
-          5) command_reset; pause_menu ;;
-          6) command_status; pause_menu ;;
-          7) command_logs; pause_menu ;;
-          8) command_update; pause_menu ;;
-          9)
+          4) command_toggle_enabled; pause_menu ;;
+          5) command_remove; pause_menu ;;
+          6) command_reset; pause_menu ;;
+          7) command_status; pause_menu ;;
+          8) command_logs; pause_menu ;;
+          9) command_update; pause_menu ;;
+          10)
             command_uninstall
             if installation_complete; then pause_menu; else exit 0; fi
             ;;
