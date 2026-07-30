@@ -75,7 +75,7 @@ sudo bash /tmp/puppyip-install.sh install
 puppyip
 ```
 
-`puppyip` 始终打开完整管理菜单。已经安装后再次执行本页的一键命令，脚本只会检查当前版本：发现旧版时询问是否原地更新，已经是最新版时不做修改。它不会重新安装，也不会自动新增节点；继续添加 IP 请使用 `puppyip add`。
+`puppyip` 始终打开完整管理菜单。已经安装后再次执行本页的一键命令，脚本会先安全更新旧版本（如有需要），随后直接进入新增 SOCKS5 的输入步骤，不会重新安装或覆盖原节点。只想管理现有线路时输入 `puppyip`；只想新增线路也可以输入 `puppyip add`。
 
 菜单提供：
 
@@ -279,7 +279,7 @@ XRAY_CHAIN_UDP_MODE=block puppyip add
 bash <(curl -fsSL https://raw.githubusercontent.com/feng9254/xray-chain-installer/main/install.sh)
 ```
 
-脚本检测到现有安装后会显示已安装版本与当前版本，并使用 `[y=同意 / n=不同意 / 回车=同意]` 询问是否更新；已经是当前版本时只显示状态，不写入任何文件。更新前会把旧状态迁移为当前 schema，再逐项核对以下不变量：
+脚本检测到旧版本后会使用 `[y=同意 / n=不同意 / 回车=同意]` 询问是否更新；成功更新后直接进入新增 SOCKS5 的输入步骤。已经是当前版本时会跳过更新并直接进入新增步骤。取消更新时不会修改节点，并提示输入 `puppyip` 打开管理菜单。更新前会把旧状态迁移为当前 schema，再逐项核对以下不变量：
 
 - VPS 地址和 VLESS 监听端口
 - 全部节点编号、备注、UUID、Short ID、SpiderX 和暂停状态

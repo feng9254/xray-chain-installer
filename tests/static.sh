@@ -261,11 +261,17 @@ bash -c '
   ! running_as_installed_manager
   SCRIPT_SOURCE="$original_script_source"
 
-  semantic_version_is_newer "0.2.15" "0.2.14"
+  upgrade_source="$(declare -f command_upgrade)"
+  existing_remote_source="$(declare -f handle_existing_remote_run)"
+  [[ "$upgrade_source" != *"print_node_list_file"* ]]
+  [[ "$existing_remote_source" != *"print_node_list_file"* ]]
+  [[ "$existing_remote_source" == *"command_add"* ]]
+
+  semantic_version_is_newer "0.2.16" "0.2.15"
   semantic_version_is_newer "1.0.0" "0.99.99"
-  ! semantic_version_is_newer "0.2.14" "0.2.14"
-  ! semantic_version_is_newer "0.2.13" "0.2.14"
-  ! semantic_version_is_newer "legacy" "0.2.14"
+  ! semantic_version_is_newer "0.2.15" "0.2.15"
+  ! semantic_version_is_newer "0.2.14" "0.2.15"
+  ! semantic_version_is_newer "legacy" "0.2.15"
 
   (
     upgrade_fixture_dir="$panel_fixture_dir/existing-upgrade"
@@ -274,18 +280,27 @@ bash -c '
     MANAGER_BIN="$upgrade_fixture_dir/puppyip"
     LEGACY_MANAGER_BIN="$upgrade_fixture_dir/xray-chain"
     printf "%s\n" \
-      "{\"schema\":1,\"installerVersion\":\"0.2.13\"}" >"$STATE_FILE"
-    printf "%s\n" "SCRIPT_VERSION=\"0.2.13\"" >"$MANAGER_BIN"
-    printf "%s\n" "SCRIPT_VERSION=\"0.2.13\"" >"$LEGACY_MANAGER_BIN"
+      "{\"schema\":1,\"installerVersion\":\"0.2.14\"}" >"$STATE_FILE"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.14\"" >"$MANAGER_BIN"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.14\"" >"$LEGACY_MANAGER_BIN"
     require_root() { :; }
     check_platform() { :; }
     require_systemd() { :; }
     show_brand_banner() { :; }
-    print_node_list_file() { :; }
+    info() { printf '%s\n' "$*"; }
     UPGRADE_CALLED="no"
+    ADD_CALLED="no"
     command_upgrade() { UPGRADE_CALLED="yes"; }
+    command_add() { ADD_CALLED="yes"; }
+
+    cancel_output="$(handle_existing_remote_run <<<"n")"
+    [[ "$UPGRADE_CALLED" == "no" ]]
+    [[ "$ADD_CALLED" == "no" ]]
+    [[ "$cancel_output" == *"管理菜单：输入 puppyip"* ]]
+
     handle_existing_remote_run <<<"y"
     [[ "$UPGRADE_CALLED" == "yes" ]]
+    [[ "$ADD_CALLED" == "yes" ]]
 
     jq --arg version "$SCRIPT_VERSION" \
       ".schema = 2 | .installerVersion = \$version" "$STATE_FILE" >"${STATE_FILE}.new"
@@ -293,8 +308,10 @@ bash -c '
     printf "%s\n" "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" >"$MANAGER_BIN"
     printf "%s\n" "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" >"$LEGACY_MANAGER_BIN"
     UPGRADE_CALLED="no"
+    ADD_CALLED="no"
     handle_existing_remote_run </dev/null
     [[ "$UPGRADE_CALLED" == "no" ]]
+    [[ "$ADD_CALLED" == "yes" ]]
     ! installation_upgrade_needed
 
     printf "%s\n" "SCRIPT_VERSION=\"9.0.0\"" >"$MANAGER_BIN"
@@ -652,6 +669,7 @@ for required in \
   'command_resume' \
   'command_upgrade' \
   'handle_existing_remote_run' \
+  'show_management_hint' \
   'assert_upgrade_invariants' \
   'canonical_runtime_identity' \
   '候选配置未完整保留 SOCKS5 凭据' \
@@ -672,11 +690,6 @@ fi
 
 if grep -Fq '10) command_uninstall; exit 0 ;;' "$SCRIPT"; then
   printf '取消卸载后不应直接退出管理菜单。\n' >&2
-  exit 1
-fi
-
-if grep -Fq '检测到已有线路，现在直接添加新线路' "$SCRIPT"; then
-  printf '重复执行一键命令不应再自动进入新增节点流程。\n' >&2
   exit 1
 fi
 

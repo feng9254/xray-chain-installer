@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="0.2.14"
+SCRIPT_VERSION="0.2.15"
 CURRENT_STATE_SCHEMA=2
 SERVICE_NAME="xray-chain.service"
 RUNTIME_USER="xray-chain"
@@ -321,6 +321,10 @@ show_socks_promo() {
     printf 'SOCKS5（支持批量，最多 %s 条）：IP:端口:用户名:密码\n' "$MAX_BATCH_SIZE"
     printf '直接回车 = 使用 VPS 本机 IP\n'
   fi
+}
+
+show_management_hint() {
+  info "管理菜单：输入 puppyip"
 }
 
 cleanup() {
@@ -2663,7 +2667,6 @@ command_upgrade() {
   deploy_full "$work_dir" yes
   configure_bbr
   info "PuppyIP Chain 已原地更新到 ${SCRIPT_VERSION}；现有链接和二维码无需重新导入。"
-  print_node_list_file "$STATE_FILE"
 }
 
 handle_existing_remote_run() {
@@ -2676,9 +2679,8 @@ handle_existing_remote_run() {
   state_version="$(installed_state_version)"
 
   if ! installation_upgrade_needed; then
-    info "当前已是 PuppyIP Chain ${SCRIPT_VERSION}，不会重新安装或新增节点。"
-    print_node_list_file "$STATE_FILE"
-    info "新增线路请执行 puppyip add；其他管理请执行 puppyip。"
+    info "当前已是 PuppyIP Chain ${SCRIPT_VERSION}，继续添加新线路。"
+    command_add
     return 0
   fi
 
@@ -2687,9 +2689,12 @@ handle_existing_remote_run() {
   prompt_yes_no answer "是否更新到 PuppyIP Chain ${SCRIPT_VERSION}？" yes
   if [[ "$answer" != 'yes' ]]; then
     info "已取消更新，现有节点和服务未修改。"
+    show_management_hint
     return 0
   fi
   command_upgrade
+  info "继续添加新线路。"
+  command_add
 }
 
 command_install() {
@@ -2705,8 +2710,8 @@ command_install() {
     else
       configure_bbr
       info "当前已是 PuppyIP Chain ${SCRIPT_VERSION}，现有节点和服务未修改。"
-      print_node_list_file "$STATE_FILE"
     fi
+    show_management_hint
     return
   fi
   if [[ -e "$STATE_FILE" || -e "$CONFIG_FILE" ]]; then
@@ -2752,7 +2757,7 @@ command_install() {
   info "安装完成。"
   print_firewall_hint
   show_connections_by_id "${NEW_NODE_IDS[@]}"
-  info "以后管理请输入：puppyip"
+  show_management_hint
 }
 
 prepare_existing_operation() {
@@ -2780,7 +2785,7 @@ command_show() {
 }
 
 command_add() {
-  local work_dir version
+  local show_hint="${1:-yes}" work_dir version
   refresh_brand_banner
   require_root
   check_platform
@@ -2796,6 +2801,7 @@ command_add() {
   refresh_brand_banner
   info "已添加 ${#NEW_NODE_IDS[@]} 个出口。"
   show_connections_by_id "${NEW_NODE_IDS[@]}"
+  [[ "$show_hint" != 'yes' ]] || show_management_hint
 }
 
 command_edit() {
@@ -3143,7 +3149,7 @@ main() {
     resume|enable) shift; command_resume "${1:-}" ;;
     remove|delete) shift; command_remove "${1:-}" "${2:-}" ;;
     reset) shift; command_reset "${1:-}" "${2:-}" ;;
-    upgrade) command_upgrade ;;
+    upgrade) command_upgrade; show_management_hint ;;
     status) command_status ;;
     logs) command_logs ;;
     update) command_update ;;
@@ -3169,7 +3175,7 @@ main() {
           exit 0
         fi
         case "$command" in
-          1) command_add; pause_menu ;;
+          1) command_add no; pause_menu ;;
           2) command_show all; pause_menu ;;
           3) command_edit; pause_menu ;;
           4) command_toggle_enabled; pause_menu ;;
