@@ -229,11 +229,18 @@ bash -c '
   banner_output="$(show_brand_banner)"
   [[ "$banner_output" == *"<white>██</>"* ]]
   [[ "$banner_output" == *"PuppyIP.com"* ]]
+  [[ "$banner_output" == *"https://puppyip.com/tutorials#"* ]]
+  [[ "$banner_output" == *"选择：VPS配置教程 → VPS 链式代理配置"* ]]
   BRAND_BANNER_SHOWN="no"
   refresh_brand_banner >"$panel_fixture_dir/banner-first"
   refresh_brand_banner >"$panel_fixture_dir/banner-second"
   grep -Fq "PuppyIP.com" "$panel_fixture_dir/banner-first"
   [[ ! -s "$panel_fixture_dir/banner-second" ]]
+  TUTORIAL_HINT_SHOWN="no"
+  show_brand_footer >"$panel_fixture_dir/footer-first"
+  show_brand_footer >"$panel_fixture_dir/footer-second"
+  grep -Fq "https://puppyip.com/tutorials#" "$panel_fixture_dir/footer-first"
+  ! grep -Fq "https://puppyip.com/tutorials#" "$panel_fixture_dir/footer-second"
   promo_output="$(show_socks_promo)"
   [[ "$promo_output" == *"PuppyIP.com"* ]]
   [[ "$promo_output" == *"原生住宅静态 IP"* ]]
@@ -267,11 +274,11 @@ bash -c '
   [[ "$existing_remote_source" != *"print_node_list_file"* ]]
   [[ "$existing_remote_source" == *"command_add"* ]]
 
-  semantic_version_is_newer "0.2.16" "0.2.15"
+  semantic_version_is_newer "0.2.17" "0.2.16"
   semantic_version_is_newer "1.0.0" "0.99.99"
-  ! semantic_version_is_newer "0.2.15" "0.2.15"
-  ! semantic_version_is_newer "0.2.14" "0.2.15"
-  ! semantic_version_is_newer "legacy" "0.2.15"
+  ! semantic_version_is_newer "0.2.16" "0.2.16"
+  ! semantic_version_is_newer "0.2.15" "0.2.16"
+  ! semantic_version_is_newer "legacy" "0.2.16"
 
   (
     upgrade_fixture_dir="$panel_fixture_dir/existing-upgrade"
@@ -280,9 +287,9 @@ bash -c '
     MANAGER_BIN="$upgrade_fixture_dir/puppyip"
     LEGACY_MANAGER_BIN="$upgrade_fixture_dir/xray-chain"
     printf "%s\n" \
-      "{\"schema\":1,\"installerVersion\":\"0.2.14\"}" >"$STATE_FILE"
-    printf "%s\n" "SCRIPT_VERSION=\"0.2.14\"" >"$MANAGER_BIN"
-    printf "%s\n" "SCRIPT_VERSION=\"0.2.14\"" >"$LEGACY_MANAGER_BIN"
+      "{\"schema\":1,\"installerVersion\":\"0.2.15\"}" >"$STATE_FILE"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.15\"" >"$MANAGER_BIN"
+    printf "%s\n" "SCRIPT_VERSION=\"0.2.15\"" >"$LEGACY_MANAGER_BIN"
     require_root() { :; }
     check_platform() { :; }
     require_systemd() { :; }
@@ -400,6 +407,158 @@ JSON
   node_list_output="$(print_node_list_file "$STATE_FILE")"
   [[ "$node_list_output" == *"状态：已启用"* ]]
   [[ "$node_list_output" == *"状态：已暂停（原链接已保留）"* ]]
+  status_state_is_valid 2
+  (
+    STATE_FILE="$fixture_dir/invalid-status-state.json"
+    printf "%s\n" "{\"schema\":2,\"inboundPort\":443,\"nodes\":[]}" >"$STATE_FILE"
+    ! status_state_is_valid 2
+  )
+
+  original_config_file="$CONFIG_FILE"
+  status_fixture_dir="$fixture_dir/status-probes"
+  mkdir -p "$status_fixture_dir"/{normal,mismatch,failed,unavailable}
+  CONFIG_FILE="$status_fixture_dir/config.json"
+  cat >"$CONFIG_FILE" <<JSON
+{
+  "outbounds": [
+    {
+      "tag": "socks-out-node-1",
+      "protocol": "socks",
+      "settings": {
+        "address": "203.0.113.10",
+        "port": 1080,
+        "user": "fixture-user",
+        "pass": "fixture-password"
+      }
+    },
+    {
+      "tag": "socks-out-node-2",
+      "protocol": "socks",
+      "settings": {
+        "address": "198.51.100.30",
+        "port": 2080,
+        "user": "fixture-user-2",
+        "pass": "fixture-password-2"
+      }
+    }
+  ]
+}
+JSON
+  status_output="$(
+    interactive_progress_enabled() { return 1; }
+    curl() {
+      local config_path=""
+      while (( $# > 0 )); do
+        if [[ "$1" == "--config" ]]; then
+          config_path="$2"
+          shift 2
+        else
+          shift
+        fi
+      done
+      grep -Fq "proxy = \"socks5h://203.0.113.10:1080\"" "$config_path"
+      grep -Fq "proxy-user = \"fixture-user:fixture-password\"" "$config_path"
+      printf "203.0.113.10\n"
+    }
+    show_status_node_health 2 "$status_fixture_dir/normal" ""
+  )"
+  [[ "$status_output" == *"线路出口检测（实时）"* ]]
+  [[ "$status_output" == *"出口 IP：203.0.113.10 · 正常"* ]]
+  [[ "$status_output" == *"状态：已暂停（未检测）"* ]]
+  [[ "$status_output" != *"fixture-password"* ]]
+
+  direct_result_file="$status_fixture_dir/normal/direct.result"
+  (
+    detect_public_ipv4() { printf "192.0.2.44"; }
+    probe_status_node node-3 direct 2 "$status_fixture_dir/normal" "$direct_result_file"
+  )
+  mapfile -t direct_result <"$direct_result_file"
+  [[ "${direct_result[0]}" == "ok" ]]
+  [[ "${direct_result[1]}" == "192.0.2.44" ]]
+
+  mismatch_output="$(
+    interactive_progress_enabled() { return 1; }
+    curl() { printf "198.51.100.99\n"; }
+    show_status_node_health 2 "$status_fixture_dir/mismatch" ""
+  )"
+  [[ "$mismatch_output" == *"出口 IP：198.51.100.99 · 与记录不一致（记录：203.0.113.10）"* ]]
+  [[ "$mismatch_output" != *"出口 IP：198.51.100.99 · 正常"* ]]
+
+  failed_output="$(
+    interactive_progress_enabled() { return 1; }
+    curl() { return 1; }
+    show_status_node_health 2 "$status_fixture_dir/failed" ""
+  )"
+  [[ "$failed_output" == *"出口检测：失败（请检查 SOCKS5、白名单或网络）"* ]]
+
+  unavailable_output="$(
+    interactive_progress_enabled() { return 1; }
+    curl() { printf "不应执行" >"$status_fixture_dir/unexpected-curl"; }
+    show_status_node_health 2 "$status_fixture_dir/unavailable" "服务未运行"
+  )"
+  [[ "$unavailable_output" == *"状态：不可用（服务未运行）"* ]]
+  [[ ! -e "$status_fixture_dir/unexpected-curl" ]]
+
+  original_xray_bin="$XRAY_BIN"
+  original_asset_dir="$ASSET_DIR"
+  XRAY_BIN="$status_fixture_dir/fake-xray"
+  ASSET_DIR="$status_fixture_dir/assets"
+  mkdir -p "$ASSET_DIR"
+  printf "%s\n" \
+    "#!/usr/bin/env bash" \
+    "if [[ \"\${1:-}\" == \"version\" ]]; then" \
+    "  printf \"Xray 26.3.27 fixture\\n\"" \
+    "fi" \
+    "exit 0" >"$XRAY_BIN"
+  chmod 0755 "$XRAY_BIN"
+  status_command_output="$(
+    require_root() { :; }
+    status_tcp_port_is_listening() { return 0; }
+    systemctl() { printf "active\n"; }
+    read_sysctl_value() {
+      if [[ "$1" == "net.ipv4.tcp_congestion_control" ]]; then
+        printf "bbr"
+      else
+        printf "fq"
+      fi
+    }
+    interactive_progress_enabled() { return 1; }
+    curl() { printf "203.0.113.10\n"; }
+    command_status
+  )"
+  [[ "$status_command_output" == *"服务：正常"* ]]
+  [[ "$status_command_output" == *"配置：正常"* ]]
+  [[ "$status_command_output" == *"入口：443/tcp（监听中）"* ]]
+  [[ "$status_command_output" == *"出口 IP：203.0.113.10 · 正常"* ]]
+
+  unlistening_status_output="$(
+    require_root() { :; }
+    status_tcp_port_is_listening() { return 1; }
+    systemctl() { printf "active\n"; }
+    read_sysctl_value() { printf "unknown"; }
+    interactive_progress_enabled() { return 1; }
+    curl() { printf "不应执行" >"$status_fixture_dir/unlistening-unexpected-curl"; }
+    command_status
+  )"
+  [[ "$unlistening_status_output" == *"入口：443/tcp（未监听）"* ]]
+  [[ "$unlistening_status_output" == *"状态：不可用（入口端口未监听）"* ]]
+  [[ ! -e "$status_fixture_dir/unlistening-unexpected-curl" ]]
+
+  inactive_status_output="$(
+    require_root() { :; }
+    status_tcp_port_is_listening() { return 0; }
+    systemctl() { printf "inactive\n"; return 3; }
+    read_sysctl_value() { printf "unknown"; }
+    interactive_progress_enabled() { return 1; }
+    curl() { printf "不应执行" >"$status_fixture_dir/inactive-unexpected-curl"; }
+    command_status
+  )"
+  [[ "$inactive_status_output" == *"服务：异常（inactive）"* ]]
+  [[ "$inactive_status_output" == *"状态：不可用（服务未运行）"* ]]
+  [[ ! -e "$status_fixture_dir/inactive-unexpected-curl" ]]
+  XRAY_BIN="$original_xray_bin"
+  ASSET_DIR="$original_asset_dir"
+  CONFIG_FILE="$original_config_file"
 
   quiet_test_dir="$fixture_dir/quiet"
   mkdir -p "$quiet_test_dir"
@@ -628,6 +787,8 @@ for required in \
   'xtls-rprx-vision' \
   'security=reality' \
   'https://PuppyIP.com' \
+  'https://puppyip.com/tutorials#' \
+  '选择：VPS配置教程 → VPS 链式代理配置' \
   'PuppyIP.com' \
   '请改用 Ubuntu 24.04 LTS（64 位）后重试' \
   '原生住宅静态 IP · 固定地区 · 长期使用' \
@@ -670,6 +831,8 @@ for required in \
   'command_upgrade' \
   'handle_existing_remote_run' \
   'show_management_hint' \
+  'probe_status_node' \
+  '线路出口检测（实时）' \
   'assert_upgrade_invariants' \
   'canonical_runtime_identity' \
   '候选配置未完整保留 SOCKS5 凭据' \

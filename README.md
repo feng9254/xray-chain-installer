@@ -4,7 +4,7 @@
 
 **VLESS + REALITY + Vision → VPS 本机直连 / SOCKS5 静态住宅出口**
 
-[PuppyIP.com](https://PuppyIP.com) · [购买静态住宅 IP](https://PuppyIP.com/static-ip) · [使用教程](https://PuppyIP.com/tutorials) · [服务条款](https://PuppyIP.com/terms)
+[PuppyIP.com](https://PuppyIP.com) · [购买静态住宅 IP](https://PuppyIP.com/static-ip) · [使用教程](https://PuppyIP.com/tutorials#) · [服务条款](https://PuppyIP.com/terms)
 
 > 原生住宅静态 IP · 固定地区 · 长期使用（具体资源属性与可用期以订单和服务条款为准）
 
@@ -57,6 +57,8 @@ IP:端口:用户名:密码
 ```
 
 输入内容不会回显。脚本会验证本机公网出口或逐条验证 SOCKS5，并为每个出口生成独立节点、`vless://` 链接和终端二维码，然后统一部署。单次最多支持 50 条 SOCKS5。
+
+终端品牌页会显示教程地址 `https://puppyip.com/tutorials#`。打开后选择“VPS配置教程 → VPS 链式代理配置”。
 
 如果当前用户不是 root，可先下载再使用 sudo：
 
@@ -115,6 +117,12 @@ puppyip uninstall
 为兼容旧版，原命令 `xray-chain` 仍可继续使用。
 
 每个确认提示都会直接写明 `y=同意`、`n=不同意` 以及回车采用哪个选择。删除、重置和卸载等操作默认不同意；更新提示默认同意。不需要输入 `DELETE`、`UNINSTALL` 等确认单词。清除历史备份会单独询问。直接执行明确的 `puppyip pause <编号>` 或 `puppyip resume <编号>` 时会立即应用，不再重复询问。
+
+### 实时状态检测
+
+选择菜单 `7` 或执行 `puppyip status` 时，脚本会先检查 PuppyIP 服务、入口 TCP 端口和当前 Xray 配置。三项均正常后，再让每条已启用线路通过自己的本机直连或 SOCKS5 出口访问公网 IP 检测站；只有实际取得有效 IPv4 时才显示“正常”。暂停线路显示“未检测”，出口超时或无法取得 IPv4 显示“检测失败”。
+
+如果实时出口与安装时记录的 IP 不同，状态页会明确标记“与记录不一致”，同时显示本次检测 IP 和原记录 IP，不会把它标为“正常”，也不会自动改写节点。该检测只确认当时的 TCP 出口和服务配置可用，不承诺所有网站、UDP 或客户端所在网络都能访问。
 
 ### 暂停与启用线路
 

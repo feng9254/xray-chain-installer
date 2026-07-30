@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="0.2.15"
+SCRIPT_VERSION="0.2.16"
 CURRENT_STATE_SCHEMA=2
 SERVICE_NAME="xray-chain.service"
 RUNTIME_USER="xray-chain"
@@ -22,6 +22,8 @@ INSTALLER_BRANCH="main"
 INSTALLER_API_URL="https://api.github.com/repos/${INSTALLER_REPOSITORY}"
 INSTALLER_RAW_BASE="https://raw.githubusercontent.com/${INSTALLER_REPOSITORY}"
 MAX_INSTALLER_BYTES=1048576
+TUTORIAL_URL="https://puppyip.com/tutorials#"
+STATUS_PROBE_CONCURRENCY=8
 
 BIN_DIR="/usr/local/lib/xray-chain"
 XRAY_BIN="${BIN_DIR}/xray"
@@ -50,6 +52,7 @@ declare -a NEW_NODE_IDS=()
 declare -a PANEL_RESERVED_PORTS=()
 LAST_TEMP_DIR=''
 BRAND_BANNER_SHOWN='no'
+TUTORIAL_HINT_SHOWN='no'
 PROGRESS_LINE_ACTIVE='no'
 PROMPT_SPACE_ACTIVE='no'
 
@@ -289,12 +292,23 @@ show_brand_banner() {
      ###
 PAW_LOGO
   printf '\n              %s%sPuppyIP.com%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
-  printf '%s  原生住宅静态 IP · 固定地区 · 长期使用%s\n\n' "$C_BOLD" "$C_RESET"
+  printf '%s  原生住宅静态 IP · 固定地区 · 长期使用%s\n' "$C_BOLD" "$C_RESET"
+  show_tutorial_hint '  '
+  printf '\n'
 }
 
 show_brand_footer() {
   printf '\n%s%sPuppyIP.com%s\n' "$C_BOLD" "$C_GREEN" "$C_RESET"
   printf '%s原生住宅静态 IP · 固定地区 · 长期使用%s\n' "$C_BOLD" "$C_RESET"
+  show_tutorial_hint
+}
+
+show_tutorial_hint() {
+  local indent="${1:-}"
+  [[ "$TUTORIAL_HINT_SHOWN" != 'yes' ]] || return 0
+  printf '%s%s教程：%s%s\n' "$indent" "$C_CYAN" "$TUTORIAL_URL" "$C_RESET"
+  printf '%s选择：VPS配置教程 → VPS 链式代理配置\n' "$indent"
+  TUTORIAL_HINT_SHOWN='yes'
 }
 
 refresh_brand_banner() {
@@ -934,7 +948,7 @@ detect_public_ipv4() {
       return 0
     fi
   done
-  return 0
+  return 1
 }
 
 state_value() {
@@ -1097,7 +1111,7 @@ assert_model_port_available() {
 collect_global_settings() {
   local detected_ip reality_migrated='no'
 
-  detected_ip="$(detect_public_ipv4)"
+  detected_ip="$(detect_public_ipv4 || true)"
   SERVER_ADDRESS="$detected_ip"
   if ! valid_ipv4_or_domain "$SERVER_ADDRESS"; then
     prompt_default SERVER_ADDRESS "未能自动识别公网 IPv4，请输入 VPS 公网 IPv4 或域名" ''
@@ -1205,7 +1219,7 @@ collect_socks_batch_settings() {
 
 verify_direct_outbound() {
   local exit_ip
-  exit_ip="$(detect_public_ipv4)"
+  exit_ip="$(detect_public_ipv4 || true)"
   if ! valid_ipv4 "$exit_ip"; then
     die "无法验证 VPS 本机公网 IPv4，未创建直连节点；请确认 VPS 可以直接访问互联网后重试。"
   fi
@@ -2954,12 +2968,250 @@ command_reset() {
   show_connection "$SELECTED_NODE_ID"
 }
 
+status_state_is_valid() {
+  local schema="$1"
+  if [[ "$schema" == '2' ]]; then
+    jq -e '
+      .schema == 2
+      and (.inboundPort | type == "number" and . >= 1 and . <= 65535)
+      and (.nodes | type == "array" and length > 0)
+      and all(.nodes[];
+        (.id | type == "string" and test("^node-[1-9][0-9]*$"))
+        and (.number | type == "number" and floor == . and . >= 1)
+        and (.name | type == "string" and length > 0)
+        and ((has("enabled") | not) or (.enabled | type == "boolean"))
+        and ((.type // "socks") == "socks" or (.type // "socks") == "direct")
+        and ((.exitIp // "") | type == "string")
+        and (
+          if (.type // "socks") == "socks" then
+            (.socksHost | type == "string" and length > 0)
+            and (.socksPort | type == "number" and . >= 1 and . <= 65535)
+          else
+            true
+          end
+        )
+      )
+    ' "$STATE_FILE" >/dev/null 2>&1
+  elif [[ "$schema" == '1' ]]; then
+    jq -e '
+      ((.schema // 1) == 1)
+      and (.inboundPort | type == "number" and . >= 1 and . <= 65535)
+      and (.nodeName | type == "string" and length > 0)
+      and (.socksHost | type == "string" and length > 0)
+      and (.socksPort | type == "number" and . >= 1 and . <= 65535)
+    ' "$STATE_FILE" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+status_tcp_port_is_listening() {
+  local port="$1"
+  ss -H -lnt 2>/dev/null \
+    | awk -v suffix=":${port}" '
+        {
+          for (field = 1; field <= NF; field += 1) {
+            if ($field ~ (suffix "$")) found = 1
+          }
+        }
+        END { exit(found ? 0 : 1) }
+      '
+}
+
+probe_ipv4_with_curl_config() {
+  local config_path="$1" endpoint result
+  local -a endpoints=(
+    'https://api.ipify.org'
+    'https://ipv4.icanhazip.com'
+    'https://ifconfig.me/ip'
+  )
+  for endpoint in "${endpoints[@]}"; do
+    result="$(curl --disable --noproxy '' -4 --config "$config_path" \
+      "$endpoint" 2>/dev/null || true)"
+    result="${result//[[:space:]]/}"
+    if valid_ipv4 "$result"; then
+      printf '%s' "$result"
+      return 0
+    fi
+  done
+  return 1
+}
+
+write_status_probe_result() {
+  local result_file="$1" status="$2" exit_ip="${3:-}"
+  printf '%s\n%s\n' "$status" "$exit_ip" >"$result_file"
+  chmod 0600 "$result_file"
+}
+
+probe_status_node() {
+  local node_id="$1" node_type="$2" schema="$3" work_dir="$4" result_file="$5"
+  local tag outbound address port user password proxy_host config_path detected_ip=''
+  write_status_probe_result "$result_file" failed
+
+  if [[ "$node_type" == 'direct' ]]; then
+    detected_ip="$(detect_public_ipv4 || true)"
+    if valid_ipv4 "$detected_ip"; then
+      write_status_probe_result "$result_file" ok "$detected_ip"
+    fi
+    return 0
+  fi
+
+  if [[ "$schema" == '2' ]]; then
+    tag="socks-out-${node_id}"
+  else
+    tag='socks-out'
+  fi
+  outbound="$(jq -cer --arg tag "$tag" \
+    '.outbounds[] | select(.tag == $tag)' "$CONFIG_FILE" 2>/dev/null)" || return 0
+  address="$(jq -er '.settings.address' <<<"$outbound" 2>/dev/null)" || return 0
+  port="$(jq -er '.settings.port' <<<"$outbound" 2>/dev/null)" || return 0
+  user="$(jq -r '.settings.user // ""' <<<"$outbound" 2>/dev/null)" || return 0
+  password="$(jq -r '.settings.pass // ""' <<<"$outbound" 2>/dev/null)" || return 0
+  valid_ipv4_or_domain "$address" || return 0
+  valid_port "$port" || return 0
+  [[ ! "$user" =~ [[:cntrl:]] && ! "$password" =~ [[:cntrl:]] ]] || return 0
+  [[ -z "$user" || -n "$password" ]] || return 0
+
+  proxy_host="$address"
+  [[ "$proxy_host" == *:* ]] && proxy_host="[${proxy_host}]"
+  config_path="${work_dir}/status-${node_id}.curl"
+  {
+    printf 'proxy = "socks5h://%s:%s"\n' "$(curl_config_escape "$proxy_host")" "$port"
+    if [[ -n "$user" ]]; then
+      printf 'proxy-user = "%s:%s"\n' \
+        "$(curl_config_escape "$user")" "$(curl_config_escape "$password")"
+    fi
+    printf 'connect-timeout = 4\nmax-time = 6\nsilent\nfail\n'
+  } >"$config_path"
+  chmod 0600 "$config_path"
+
+  if detected_ip="$(probe_ipv4_with_curl_config "$config_path")" \
+    && valid_ipv4 "$detected_ip"; then
+    write_status_probe_result "$result_file" ok "$detected_ip"
+  fi
+  rm -f -- "$config_path" || true
+}
+
+show_status_node_health() {
+  local schema="$1" work_dir="$2" unavailable_reason="${3:-}"
+  local node_id pid completed=0 total_enabled=0 status detected_ip expected_ip
+  local -a node_ids=() running_pids=() result_lines=()
+  local -A numbers=() names=() types=() enabled=() expected=() result_files=()
+
+  if [[ "$schema" == '2' ]]; then
+    mapfile -t node_ids < <(jq -r '.nodes | sort_by(.number)[] | .id' "$STATE_FILE")
+    for node_id in "${node_ids[@]}"; do
+      numbers[$node_id]="$(jq -er --arg id "$node_id" \
+        '.nodes[] | select(.id == $id) | .number' "$STATE_FILE")"
+      names[$node_id]="$(jq -er --arg id "$node_id" \
+        '.nodes[] | select(.id == $id) | .name' "$STATE_FILE")"
+      types[$node_id]="$(jq -er --arg id "$node_id" \
+        '.nodes[] | select(.id == $id) | (.type // "socks")' "$STATE_FILE")"
+      enabled[$node_id]="$(jq -r --arg id "$node_id" \
+        '.nodes[] | select(.id == $id) | if .enabled == false then "false" else "true" end' \
+        "$STATE_FILE")"
+      expected[$node_id]="$(jq -r --arg id "$node_id" \
+        '.nodes[] | select(.id == $id) | (.exitIp // "")' "$STATE_FILE")"
+    done
+  else
+    node_ids=('node-1')
+    numbers['node-1']='1'
+    names['node-1']="$(jq -r '.nodeName // "PuppyIP-1"' "$STATE_FILE")"
+    types['node-1']='socks'
+    enabled['node-1']='true'
+    expected['node-1']=''
+  fi
+
+  printf '\n%s线路出口检测（实时）%s\n' "$C_BOLD" "$C_RESET"
+  if [[ -n "$unavailable_reason" ]]; then
+    for node_id in "${node_ids[@]}"; do
+      printf '  %s) %s\n' "${numbers[$node_id]}" "${names[$node_id]}"
+      if [[ "${enabled[$node_id]}" == 'false' ]]; then
+        printf '     状态：已暂停（未检测）\n'
+      else
+        printf '     状态：不可用（%s）\n' "$unavailable_reason"
+      fi
+    done
+    return 0
+  fi
+
+  for node_id in "${node_ids[@]}"; do
+    [[ "${enabled[$node_id]}" == 'true' ]] || continue
+    total_enabled=$((total_enabled + 1))
+    result_files[$node_id]="${work_dir}/status-${node_id}.result"
+  done
+
+  if (( total_enabled > 0 )); then
+    if interactive_progress_enabled; then
+      show_progress_line 0 "$total_enabled" "正在检测线路出口"
+    else
+      info "正在检测 ${total_enabled} 条线路出口..."
+    fi
+    for node_id in "${node_ids[@]}"; do
+      [[ "${enabled[$node_id]}" == 'true' ]] || continue
+      probe_status_node "$node_id" "${types[$node_id]}" "$schema" "$work_dir" \
+        "${result_files[$node_id]}" &
+      running_pids+=("$!")
+      if (( ${#running_pids[@]} >= STATUS_PROBE_CONCURRENCY )); then
+        wait "${running_pids[0]}" || true
+        running_pids=("${running_pids[@]:1}")
+        completed=$((completed + 1))
+        if interactive_progress_enabled; then
+          show_progress_line "$completed" "$total_enabled" "正在检测线路出口"
+        fi
+      fi
+    done
+    for pid in "${running_pids[@]}"; do
+      wait "$pid" || true
+      completed=$((completed + 1))
+      if interactive_progress_enabled; then
+        show_progress_line "$completed" "$total_enabled" "正在检测线路出口"
+      fi
+    done
+    finish_progress_line
+  fi
+
+  for node_id in "${node_ids[@]}"; do
+    printf '  %s) %s\n' "${numbers[$node_id]}" "${names[$node_id]}"
+    if [[ "${enabled[$node_id]}" == 'false' ]]; then
+      printf '     状态：已暂停（未检测）\n'
+      continue
+    fi
+    result_lines=()
+    if [[ -r "${result_files[$node_id]}" ]]; then
+      mapfile -t result_lines <"${result_files[$node_id]}"
+    fi
+    status="${result_lines[0]:-failed}"
+    detected_ip="${result_lines[1]:-}"
+    expected_ip="${expected[$node_id]}"
+    if [[ "$status" == 'ok' ]] && valid_ipv4 "$detected_ip"; then
+      if [[ -n "$expected_ip" && "$expected_ip" != "$detected_ip" ]]; then
+        printf '     出口 IP：%s · 与记录不一致（记录：%s）\n' "$detected_ip" "$expected_ip"
+      else
+        printf '     出口 IP：%s · 正常\n' "$detected_ip"
+      fi
+    elif [[ "${types[$node_id]}" == 'direct' ]]; then
+      printf '     出口检测：失败（VPS 网络异常或检测站不可达）\n'
+    else
+      printf '     出口检测：失败（请检查 SOCKS5、白名单或网络）\n'
+    fi
+  done
+}
+
 command_status() {
-  local version_output node_count enabled_count paused_count port service_state validation_log tcp_cc default_qdisc
+  local version_output node_count enabled_count paused_count port service_state service_label
+  local validation_log tcp_cc default_qdisc schema config_valid='no' port_listening='no'
+  local unavailable_reason='' work_dir entry_label
   require_root
   [[ -x "$XRAY_BIN" && -r "$CONFIG_FILE" && -r "$STATE_FILE" ]] || die "PuppyIP Chain 尚未安装。"
-  version_output="$($XRAY_BIN version)"
-  if [[ "$(jq -r '.schema // 1' "$STATE_FILE")" == '2' ]]; then
+  if ! version_output="$($XRAY_BIN version 2>/dev/null)"; then
+    die "Xray 程序无法运行，未执行线路检测。"
+  fi
+  schema="$(jq -er '.schema // 1' "$STATE_FILE" 2>/dev/null)" \
+    || die "状态文件无法读取，未执行线路检测。"
+  status_state_is_valid "$schema" \
+    || die "状态文件不完整，无法可靠检测线路。"
+  if [[ "$schema" == '2' ]]; then
     node_count="$(jq '.nodes | length' "$STATE_FILE")"
     enabled_count="$(jq '[.nodes[] | select(.enabled != false)] | length' "$STATE_FILE")"
   else
@@ -2968,23 +3220,46 @@ command_status() {
   fi
   paused_count="$((node_count - enabled_count))"
   port="$(jq -r '.inboundPort' "$STATE_FILE")"
+  if status_tcp_port_is_listening "$port"; then
+    port_listening='yes'
+    entry_label="${port}/tcp（监听中）"
+  else
+    entry_label="${port}/tcp（未监听）"
+  fi
   service_state="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
+  if [[ "$service_state" == 'active' ]]; then
+    service_label='正常'
+  else
+    service_label="异常（${service_state:-未知}）"
+  fi
   tcp_cc="$(read_sysctl_value net.ipv4.tcp_congestion_control)"
   default_qdisc="$(read_sysctl_value net.core.default_qdisc)"
   tcp_cc="${tcp_cc:-unknown}"
   default_qdisc="${default_qdisc:-unknown}"
   printf '\n%sPuppyIP Chain 状态%s\n' "$C_BOLD" "$C_RESET"
   printf '  核心：%s\n' "${version_output%%$'\n'*}"
-  printf '  服务：%s\n  节点：%s（启用 %s · 暂停 %s）\n  入口：%s/tcp\n' \
-    "$service_state" "$node_count" "$enabled_count" "$paused_count" "$port"
+  printf '  服务：%s\n  节点：%s（启用 %s · 暂停 %s）\n  入口：%s\n' \
+    "$service_label" "$node_count" "$enabled_count" "$paused_count" "$entry_label"
   printf '  TCP：%s · qdisc %s\n' "$tcp_cc" "$default_qdisc"
   new_temp_dir
-  validation_log="${LAST_TEMP_DIR}/status-validation.log"
+  work_dir="$LAST_TEMP_DIR"
+  validation_log="${work_dir}/status-validation.log"
   if XRAY_LOCATION_ASSET="$ASSET_DIR" "$XRAY_BIN" run -test -c "$CONFIG_FILE" \
     >"$validation_log" 2>&1; then
-    info "配置校验通过。"
+    config_valid='yes'
+    printf '  配置：正常\n'
   else
-    warn "配置校验失败。"
+    printf '  配置：异常\n'
+  fi
+  if [[ "$service_state" != 'active' ]]; then
+    unavailable_reason='服务未运行'
+  elif [[ "$port_listening" != 'yes' ]]; then
+    unavailable_reason='入口端口未监听'
+  elif [[ "$config_valid" != 'yes' ]]; then
+    unavailable_reason='配置校验失败'
+  fi
+  show_status_node_health "$schema" "$work_dir" "$unavailable_reason"
+  if [[ "$config_valid" != 'yes' ]]; then
     show_error_log "$validation_log"
   fi
 }
