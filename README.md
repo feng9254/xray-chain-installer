@@ -4,7 +4,7 @@
 
 **VLESS + REALITY + Vision → VPS 本机直连 / SOCKS5 静态住宅出口**
 
-[PuppyIP.com](https://PuppyIP.com) · [购买静态住宅 IP](https://PuppyIP.com/static-ip) · [使用教程](https://PuppyIP.com/tutorials#) · [服务条款](https://PuppyIP.com/terms)
+[PuppyIP.com](https://PuppyIP.com) · [购买静态住宅 IP](https://PuppyIP.com/static-ip) · [使用教程](https://puppyip.com/tutorials#vps-chain) · [服务条款](https://PuppyIP.com/terms)
 
 > 原生住宅静态 IP · 固定地区 · 长期使用（具体资源属性与可用期以订单和服务条款为准）
 
@@ -58,7 +58,7 @@ IP:端口:用户名:密码
 
 输入内容不会回显。脚本会验证本机公网出口或逐条验证 SOCKS5，并为每个出口生成独立节点、`vless://` 链接和终端二维码，然后统一部署。单次最多支持 50 条 SOCKS5。
 
-终端品牌页会显示教程地址 `https://puppyip.com/tutorials#`。打开后选择“VPS配置教程 → VPS 链式代理配置”。
+终端品牌页会显示教程地址 `https://puppyip.com/tutorials#vps-chain`。打开后选择“VPS配置教程 → VPS 链式代理配置”。
 
 如果当前用户不是 root，可先下载再使用 sudo：
 
