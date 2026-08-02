@@ -22,7 +22,7 @@ INSTALLER_BRANCH="main"
 INSTALLER_API_URL="https://api.github.com/repos/${INSTALLER_REPOSITORY}"
 INSTALLER_RAW_BASE="https://raw.githubusercontent.com/${INSTALLER_REPOSITORY}"
 MAX_INSTALLER_BYTES=1048576
-TUTORIAL_URL="https://puppyip.com/tutorials#"
+TUTORIAL_URL="https://puppyip.com/tutorials#vps-chain"
 STATUS_PROBE_CONCURRENCY=8
 
 BIN_DIR="/usr/local/lib/xray-chain"
